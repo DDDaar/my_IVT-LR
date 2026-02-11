@@ -100,20 +100,6 @@ nohup python infer_chameleon_scienceqa.py > infer.log 2>&1 &
 ```
 
 
-### Citation
-
-If you use **IVT-LR** in your research or applications, please consider citing:
-
-```bibtex
-@article{chen2025reasoning,
-  title={Reasoning in the dark: Interleaved vision-text reasoning in latent space},
-  author={Chen, Chao and Ma, Zhixin and Li, Yongqi and Hu, Yupeng and Wei, Yinwei and Li, Wenjie and Nie, Liqiang},
-  journal={arXiv preprint arXiv:2510.12603},
-  year={2025}
-}
-```
-
-
 
 
 

@@ -1,5 +1,5 @@
 project: IVTLR
-save_path: /path/IVT-LR/chameleon/chameleon_sqa_64
+save_path: /home/ma-user/work/lbx/IVT-LR/chameleon/output
 name: sqa_IVTLR
 
 

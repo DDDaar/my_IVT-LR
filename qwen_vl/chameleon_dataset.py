@@ -17,26 +17,33 @@ from itertools import count
 
 
 logging.basicConfig(
-    filename='qwenvl_sqa_4.log',  
-    level=logging.DEBUG,          
-    format='[%(asctime)s] %(message)s', 
-    datefmt='%Y-%m-%d %H:%M:%S' 
+    filename='chameleon_sqa_train.log',  
+    level=logging.DEBUG,        
+    format='[%(asctime)s] %(message)s',  
+    datefmt='%Y-%m-%d %H:%M:%S'   
 )
 
 
 def get_dataset(dataset, tokenizer, processor, max_size=1000000000):
 
-    def tokenize_sample(sample, max_length=3400):
+    def tokenize_sample(sample, max_length=1400):
         image = sample["image"]
-        pixel_values = sample["pixel_values"]
-        image_grid_thw = sample["image_grid_thw"]
+        inputs = processor(
+            images=image,
+            text="hello",
+            return_tensors="pt"
+        )
+        inputs = {k: v.tolist() for k, v in inputs.items()}
+        pixel_values = torch.tensor(inputs["pixel_values"][0])
+        
         
         processed_question = sample["question"]
-
+        
         # Tokenize question
-        question_tokenized = sample["input_ids"]
-        #logging.debug(f"step length: {len(sample["steps"])}")
-        logging.debug(f"step length: {len(sample['steps'])}")
+        question_tokenized = tokenizer.encode(
+            processed_question, add_special_tokens=False
+        )
+        
         # Tokenize steps
         steps_tokenized = [
             tokenizer.encode(s + "\n", add_special_tokens=False)
@@ -54,7 +61,7 @@ def get_dataset(dataset, tokenizer, processor, max_size=1000000000):
             + sum(len(step) for step in steps_tokenized)
             + len(answer_tokenized)
         )
-        print("question length: ", len(question_tokenized))
+        logging.debug(f"question length: {len(question_tokenized)}")
         # If total length exceeds max_length, truncate steps_tokenized
         if total_length > max_length:
             # Calculate how much to reduce
@@ -75,11 +82,13 @@ def get_dataset(dataset, tokenizer, processor, max_size=1000000000):
             "steps_tokenized": steps_tokenized,
             "answer_tokenized": answer_tokenized,
             "pixel_values": pixel_values,
-            "image_grid_thw": image_grid_thw,
             "idx": sample["idx"],
         }
         
         return sample
+
+
+
 
     dataset = dataset.map(lambda example, idx: {"idx": idx}, with_indices=True)
     data = dataset
@@ -101,6 +110,8 @@ def get_dataset(dataset, tokenizer, processor, max_size=1000000000):
             tokenize_sample, remove_columns=list(dataset.features), num_proc=32
         )
 
+
+
     return dataset
 
 
@@ -121,7 +132,7 @@ class MyCollator:
             if self.latent_id in feature["input_ids"]
         ]
 
-        if len(earliest_latent) > 0:  
+        if len(earliest_latent) > 0: 
             latest_earliest_latent = max(earliest_latent)
             for feature in features:
                 if self.latent_id in feature["input_ids"]:
@@ -175,7 +186,6 @@ class MyCollator:
             if "position_ids" in features[0].keys()
             else None
         )
-        # we have to pad the labels and position_ids manually as we cannot rely on `tokenizer.pad`
 
         if labels is not None:
             max_label_length = max(len(l) for l in labels)
@@ -198,6 +208,8 @@ class MyCollator:
             )
 
         return batch
+
+
 
 def get_cot_latent_dataset(
     scheduled_stage,
@@ -230,6 +242,7 @@ def get_cot_latent_dataset(
                 scheduled_stage_to_train,
             )
 
+
         tokens = (
             sample["question_tokenized"]
             + [latent_id] * n_latent_tokens
@@ -238,7 +251,7 @@ def get_cot_latent_dataset(
             )
             + sample["answer_tokenized"]
         )
-        
+
         return {
             "input_ids": tokens,
             "labels": [-100]
@@ -253,8 +266,7 @@ def get_cot_latent_dataset(
             "attention_mask": [1] * len(tokens),
             "idx": sample["idx"],
             "position_ids": list(range(len(tokens))),
-            "pixel_values": torch.tensor(sample["pixel_values"]),
-            "image_grid_thw": sample["image_grid_thw"]
+            "pixel_values": torch.tensor(sample["pixel_values"])
         }
 
     if torch.cuda.device_count() > 1:

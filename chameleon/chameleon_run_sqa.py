@@ -2,6 +2,7 @@ import os
 os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True'
 
 import torch
+from torch_npu.contrib import transfer_to_npu
 import torch.distributed
 import torch.optim as optim
 from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -111,10 +112,13 @@ def main():
         
     
     print("start loading model")
-
-    processor = ChameleonProcessor.from_pretrained("facebook/chameleon-7b")
-    model = ChameleonForConditionalGeneration.from_pretrained("facebook/chameleon-7b", torch_dtype=torch.bfloat16, device_map="cuda", trust_remote_code=True, attn_implementation="eager")
+    
+    model = ChameleonForConditionalGeneration.from_pretrained("/home/ma-user/work/lbx/models/chameleon7b_pku", torch_dtype=torch.bfloat16, device_map="cuda", trust_remote_code=True, attn_implementation="eager")
+    processor = ChameleonProcessor.from_pretrained("/home/ma-user/work/lbx/models/chameleon7b_pku")
+    # processor = ChameleonProcessor.from_pretrained("facebook/chameleon-7b")
+    # model = ChameleonForConditionalGeneration.from_pretrained("facebook/chameleon-7b", torch_dtype=torch.bfloat16, device_map="cuda", trust_remote_code=True, attn_implementation="eager")
     model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
+
     optimizer = AdamW(filter(lambda p: p.requires_grad, model.parameters()), lr=configs.lr)
     tokenizer = processor.tokenizer
     tokenizer.padding_side = "right"
@@ -242,7 +246,8 @@ def main():
             "image" in example and example["image"] is not None
         )
 
-    train_dataset = dataset["train"].select(range(10)).filter(has_image)
+    #train_dataset = dataset["train"].select(range(10)).filter(has_image)
+    train_dataset = dataset["train"].filter(has_image)
     train_dataset = train_dataset.map(process_example, num_proc=32)
 
     base_dataset_train = get_dataset(

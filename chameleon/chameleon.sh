@@ -1,0 +1,21 @@
+#!/bin/bash
+
+# 配置环境变量
+export ASCEND_VISIBLE_DEVICES=0,1,2,3
+export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3
+# export NCCL_P2P_LEVEL=NVL
+export PYTHONUNBUFFERED=1
+export WANDB_API_KEY=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
+export HF_ENDPOINT=https://hf-mirror.com
+export HF_TOKEN="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"
+
+# 进入目录
+# cd qwen_vl || exit
+
+# 启动 DeepSpeed
+# 不使用 nohup，日志会直接打在屏幕上
+deepspeed --master_port 29522 \
+    chameleon_run_sqa.py args/chameleon.yaml \
+    --deepspeed \
+    --deepspeed_config ds_config.json \
+    2>&1 | tee chameleon.txt

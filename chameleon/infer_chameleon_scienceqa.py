@@ -5,6 +5,7 @@ Chameleon infer on ScienceQA
 from transformers import ChameleonProcessor, ChameleonForConditionalGeneration
 from chameleon_ivtlr import IVTLR
 import torch
+from torch_npu.contrib import transfer_to_npu
 from peft import LoraConfig, get_peft_model
 from datasets import load_dataset
 import re

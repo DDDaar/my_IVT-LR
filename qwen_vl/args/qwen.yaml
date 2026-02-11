@@ -1,6 +1,9 @@
 project: ivtlr
-save_path: /path
-name: m3cot_IVTLR
+save_path: /home/ma-user/work/lbx/IVT-LR/qwen_vl/output
+name: sqa_qwen2vl_IVTLR
+
+# 添加数据集控制字段
+dataset_name: scienceqa  # 选项: 'm3cot' 或 'scienceqa'
 
 epochs_per_stage: 4
 max_latent_stage: 5
@@ -10,7 +13,10 @@ load_model_path: None
 seed: 0
 resume: 0
 bf16: True
+
+# 原本是2,m3cot用的4
 batch_size_training: 2
+
 debug: False
 gradient_accumulation_steps: 8
 num_epochs: 16
