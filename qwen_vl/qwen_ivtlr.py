@@ -70,16 +70,24 @@ class IVTLR(nn.Module):
         _ = self.processor.tokenizer.batch_decode(
             input_ids, skip_special_tokens=False, clean_up_tokenization_spaces=True
         )
-
+        # 将输入的token id转为embeddings
         inputs_embeds = self.embedding(input_ids)  # (B, S, D)
 
         original_mask = torch.ones((B, S), dtype=torch.bool, device=input_ids.device)
 
         vs_indices = (input_ids == self.visual_start_id).nonzero(as_tuple=True)
+        # vs_indices = (tensor([0, 1]), tensor([2, 3]))
+        # 第一个tensor是批次索引：[批次0, 批次1]
+        # 第二个tensor是序列位置：[位置2, 位置3]
         ve_indices = (input_ids == self.visual_end_id).nonzero(as_tuple=True)
+#     vs_pos_per_batch = {
+#     0: 2,  # 批次0的视觉开始标记在位置2
+#     1: 3   # 批次1的视觉开始标记在位置3
+# }
         vs_pos_per_batch = {b.item(): vs_indices[1][i].item() for i, b in enumerate(vs_indices[0])}
         ve_pos_per_batch = {b.item(): ve_indices[1][i].item() for i, b in enumerate(ve_indices[0])}
 
+        
         if pixel_values is not None:
             pixel_values = pixel_values.type(self.base_causallm.visual.get_dtype())
             image_embeds = self.base_causallm.visual(pixel_values, grid_thw=image_grid_thw)
@@ -88,23 +96,29 @@ class IVTLR(nn.Module):
                 raise ValueError(
                     f"Image features and image tokens do not match: tokens: {n_image_tokens}, features {image_embeds.shape[0]}"
                 )
+            # 图像部分掩码
             image_mask_init = (input_ids == self.image_token_id)  # (B, orig_S)
+            # 假设D=768，则expand_mask形状为(B, S, 768)，每个图像token位置的所有768维都是True
             expand_mask = image_mask_init.unsqueeze(-1).expand(-1, -1, inputs_embeds.size(-1))
             image_embeds = image_embeds.to(inputs_embeds.device, inputs_embeds.dtype)
+            #替换图像token的嵌入
             inputs_embeds = inputs_embeds.masked_scatter(expand_mask, image_embeds)
         else:
             image_mask_init = torch.zeros((B, S), dtype=torch.bool, device=input_ids.device)
         
-
+        #将所有序列统一到最大长度，方便批处理
         max_len = 3000
         image_mask = torch.zeros((B, max_len), dtype=torch.bool, device=input_ids.device)
         image_mask[:, :S] = image_mask_init
 
 
         for b in range(B):
+            #标记出每一条数据（Batch）中图像 Token 所在的索引范围。
             vs, ve = vs_pos_per_batch[b], ve_pos_per_batch[b]
             image_mask[b, vs+1:ve] = True
 
+        #latent token的位置
+        #max_n_latents 计算当前 Batch 中最长的推理链条长度
         latent_indices = (input_ids == self.latent_token_id).nonzero()
         latent_lists = [
             [idx[1].item() for idx in latent_indices if idx[0] == b]
@@ -112,6 +126,8 @@ class IVTLR(nn.Module):
         ]
         max_n_latents = max((len(lst) for lst in latent_lists), default=0)
 
+        # 如果存在推理 Token，它将 end 设为 第一个思考 Token 出现的位置。
+        # 这意味着模型在处理输入时，只会一次性处理到第一个 <|thought|> 之前的内容（通常是图像和问题提示词）。
         if max_n_latents > 0:
             first_latent_pos = min(lst[0] for lst in latent_lists if len(lst) > 0)
             end = first_latent_pos
@@ -121,10 +137,15 @@ class IVTLR(nn.Module):
         kv_cache = None
         all_logits = []
 
+        #外层循环：多轮潜变量处理
         if max_n_latents > 0:
+            # 对k个latent token依次处理
             for pass_idx in range(max_n_latents):
+                #初始化每轮的变量，从头开始
                 start = 0
                 hidden_states_offset = 0
+                #无KV缓存：attention_mask只取当前段(start:end)
+                #有KV缓存：attention_mask需要包含之前的所有token(:end)
                 if kv_cache is None:
                     outputs = self.base_causallm(
                         inputs_embeds=inputs_embeds[:, start:end, :],  # (B, end, D)
@@ -148,16 +169,16 @@ class IVTLR(nn.Module):
                         use_cache=True,
                     )
 
-                logits_this = outputs.logits                   
-                hidden_states = outputs.hidden_states[-1]      
-                attentions    = outputs.attentions              # list of (B, heads, seq_len, seq_len)
+                logits_this = outputs.logits     #当前步的logits              
+                hidden_states = outputs.hidden_states[-1]     #最后一层的隐藏状态  
+                attentions    = outputs.attentions        #所有注意力层的注意力权重列表 list of (B, heads, seq_len, seq_len)
                 kv_cache      = outputs.past_key_values
 
                 all_logits.append(logits_this)
 
                 #   Top-K
-                avg_attn = torch.cat(attentions, dim=1).mean(dim=1)  # (B, seq_len)
-                current_seq_len = avg_attn.size(1)
+                avg_attn = torch.cat(attentions, dim=1).mean(dim=1)  # (B, seq_len) 将所有层的注意力矩阵在 heads（头）维度上拼接。
+                current_seq_len = avg_attn.size(1) #seq长度
                 select_image_embeds = []
 
                 for b in range(B):

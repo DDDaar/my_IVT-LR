@@ -256,7 +256,7 @@ def get_cot_latent_dataset(
             + sample["answer_tokenized"]
         )
 
-        # labels: 问题和潜变量部分设为-100（不计算损失），其余部分计算损失
+        # labels: 问题和潜变量部分设为-100（不计算损失），其余部分（剩余steps和answer）计算损失
         # attention_mask: 全部为1（都参与注意力计算）
         # 保留图像信息
         return {
