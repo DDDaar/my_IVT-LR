@@ -1,9 +1,9 @@
 project: ivtlr
 save_path: /home/ma-user/work/lbx/IVT-LR/qwen_vl/output
-name: sqa_qwen2vl_IVTLR
+name: m3cot_qwen2vl_IVTLR
 
 # 添加数据集控制字段
-dataset_name: scienceqa  # 选项: 'm3cot' 或 'scienceqa'
+dataset_name: m3cot  # 选项: 'm3cot' 或 'scienceqa'
 
 epochs_per_stage: 4
 max_latent_stage: 5
@@ -14,7 +14,7 @@ seed: 0
 resume: 0
 bf16: True
 
-# 原本是2,m3cot用的4
+# 原本是2,m3cot用的4，后面都用2吧？
 batch_size_training: 2
 
 debug: False

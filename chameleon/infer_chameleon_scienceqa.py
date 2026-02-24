@@ -19,7 +19,7 @@ logging.basicConfig(
     filename='chameleon_sqa_infer_64_full.log',
     level=logging.DEBUG,
     format='[%(asctime)s] %(message)s',
-    datefmt='%Y-%m-%d %H:%M:%S'
+    datefmt='%Y-%m-%d %H:%M:%S'   
 )
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -29,7 +29,7 @@ def load_inference_model(checkpoint_path):
     print("Loading Chameleon model...")
     
 
-    processor = ChameleonProcessor.from_pretrained("facebook/chameleon-7b")
+    processor = ChameleonProcessor.from_pretrained("/home/ma-user/work/lbx/models/chameleon7b_pku")
     tokenizer = processor.tokenizer
     tokenizer.padding_side = "right"
     tokenizer.pad_token = tokenizer.eos_token
@@ -44,7 +44,7 @@ def load_inference_model(checkpoint_path):
     })
     
     base_model = ChameleonForConditionalGeneration.from_pretrained(
-        "facebook/chameleon-7b",
+        "/home/ma-user/work/lbx/models/chameleon7b_pku",
         device_map="cuda",
         torch_dtype=torch.bfloat16,
         trust_remote_code=True,
@@ -89,7 +89,7 @@ def load_inference_model(checkpoint_path):
     model.eval()
     return model, processor, tokenizer
 
-model, processor, tokenizer = load_inference_model("your_pth_path")
+model, processor, tokenizer = load_inference_model("/home/ma-user/work/lbx/IVT-LR/chameleon/output/sqa_IVTLR/epoch_16_full_model_fp32.pth")
 
 os.makedirs("sqa_output", exist_ok=True)
 

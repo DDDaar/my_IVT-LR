@@ -590,6 +590,7 @@ lora_config = LoraConfig(
 
 
 def process_m3cot_example(example,processor):
+    #数据划分，除了完整cot，分为3个部分，均匀划分
     rationale = example["rationale"].replace("\n", " ").strip()
     example["steps"] = rationale.split(". ")
     if example["steps"][-1] == "":
@@ -768,6 +769,8 @@ def process_sqa_example(example,processor):
 
 
 def main():
+    # deepspeed初始化
+    
     print("Initializing DeepSpeed Training!")
     parser = argparse.ArgumentParser(description="ivtlr")
     parser.add_argument("config_file")
@@ -787,6 +790,7 @@ def main():
     with open(args.config_file) as f:
         config_dict = yaml.safe_load(f)
 
+    # config读取
     configs = Config(config_dict)
     set_seed(configs.seed)
     save_dir = os.path.join(configs.save_path, configs.name)
@@ -812,7 +816,7 @@ def main():
         )
         
         
-        
+    # 模型、分词器加载，新增token    
     print("start loading model")
     # Todo:modify model and Tokenizer
     # model = Qwen2VLForConditionalGeneration.from_pretrained(
@@ -840,6 +844,7 @@ def main():
     visual_start_id = tokenizer.convert_tokens_to_ids("<|vision_start|>")
     visual_end_id = tokenizer.convert_tokens_to_ids("<|vision_end|>")
 
+    #  LoRA配置和token嵌入初始化
     model = get_peft_model(model, lora_config)
 
     loaded = False
@@ -849,6 +854,7 @@ def main():
     target_id = tokenizer.convert_tokens_to_ids("<<")
     # initialize the new token embeddings with a known token
     # it helps stablize the training
+    # 这里似乎没有使用已有的embedding初始化？
     for token_id in [latent_id, start_id, end_id]:
         target_embedding = embeddings.weight.data[token_id]
         embeddings.weight.data[token_id] = target_embedding
@@ -860,6 +866,7 @@ def main():
 
     model = IVTLR(model, latent_id, start_id, end_id, tokenizer.eos_token_id, image_token_id, visual_start_id, visual_end_id)
 
+    # deepspeed包装模型
     print(f"Running Deepspeed on rank = {rank}, world size = {world_size}")
     model = model.to(rank)
     
@@ -876,6 +883,7 @@ def main():
     del model
 
 
+    # 数据集加载
     # --- Dataset Loading Logic Modified ---
     print("start dataset")
     dataset_name = getattr(configs, "dataset_name", "m3cot") # 默认为 m3cot 以兼容旧配置
@@ -939,13 +947,16 @@ def main():
 
     collator = MyCollator(tokenizer, latent_id=latent_id, label_pad_token_id=-100)
 
+    # 训练循环
     # pdb.set_trace()
     for epoch in range(configs.resume, configs.num_epochs):
 
+        # 正在处于训练的哪一个阶段
         scheduled_stage = epoch // configs.epochs_per_stage
 
         np.random.seed(epoch) 
-
+        # import torch
+        # 得到该阶段的数据集
         dataset_train = get_cot_latent_dataset(
             scheduled_stage,
             base_dataset_train,
@@ -968,6 +979,7 @@ def main():
         )
 
         model_engine.train()
+        # total_length是实际参数更新的次数
         total_length = len(train_dataloader) // configs.gradient_accumulation_steps
         pbar = tqdm(
             colour="blue",
@@ -977,6 +989,9 @@ def main():
         )
         for step, batch in enumerate(train_dataloader):
             print("start")
+#             只在第一个batch记录详细数据
+#             用于调试和可视化训练数据
+#             显示token ID、label和解码文本的对应关系
             if step == 0 and wandb_run and rank == 0:
                 print("logging training data")
                 cur_bs = len(batch["input_ids"])
@@ -1025,6 +1040,7 @@ def main():
         pbar.close()
         dist.barrier()
 
+        # 每个stage结束后，保存一次模型权重
         if (
             not configs.debug
             and (epoch + 1) % 4 == 0
