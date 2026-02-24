@@ -592,8 +592,8 @@ def evaluate_dataset(dataset_name, eval_dataset, model, processor, output_file):
 
 def main():
     parser = argparse.ArgumentParser(description="Evaluate original Qwen2-VL on M3CoT and ScienceQA")
-    parser.add_argument("--model_path", type=str, default="/home/ma-user/work/lbx/models/Qwen2-VL-7B-Instruct", help="Path to the model")
-    parser.add_argument("--dataset", type=str, default="scienceqa", choices=["m3cot", "scienceqa", "all"], help="Dataset to evaluate")
+    parser.add_argument("--model_path", type=str, default="/home/ma-user/work/lbx/models/Qwen2-VL-2B-Instruct", help="Path to the model")
+    parser.add_argument("--dataset", type=str, default="all", choices=["m3cot", "scienceqa", "all"], help="Dataset to evaluate")
     parser.add_argument("--output_dir", type=str, default="output_ori", help="Output directory")
     args = parser.parse_args()
 

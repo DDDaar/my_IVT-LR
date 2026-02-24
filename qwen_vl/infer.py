@@ -261,10 +261,10 @@ import pdb
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
 # [修改] 增加 checkpoint_path 参数，不再硬编码
-def load_inference_model(checkpoint_path):
-    processor = AutoProcessor.from_pretrained("/home/ma-user/work/lbx/models/Qwen2-VL-7B-Instruct")
+def load_inference_model(checkpoint_path, model_base_path):
+    processor = AutoProcessor.from_pretrained(model_base_path)
     tokenizer = AutoTokenizer.from_pretrained(
-        "/home/ma-user/work/lbx/models/Qwen2-VL-7B-Instruct",
+        model_base_path,
         use_fast=False,
         trust_remote_code=True,
         padding_side="right"
@@ -279,7 +279,7 @@ def load_inference_model(checkpoint_path):
     })
     
     base_model = Qwen2VLForConditionalGeneration.from_pretrained(
-        "/home/ma-user/work/lbx/models/Qwen2-VL-7B-Instruct",
+        model_base_path,
         device_map="cuda",
         torch_dtype=torch.bfloat16,
         trust_remote_code=True,
@@ -314,7 +314,8 @@ def load_inference_model(checkpoint_path):
         eos_token_id=tokenizer.eos_token_id,
         image_token_id=image_token_id,
         visual_start_id=visual_start_id, 
-        visual_end_id=visual_end_id
+        visual_end_id=visual_end_id,
+        model_path=model_base_path
     )
     
     print(f"Loading checkpoint from {checkpoint_path}...")
@@ -656,11 +657,12 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Inference for IVT-LR (Qwen2-VL)")
     parser.add_argument("--checkpoint", type=str, default='/home/ma-user/work/lbx/IVT-LR/qwen_vl/output/m3cot_IVTLR/epoch_16_full_model_fp32.pth', help="Path to the model checkpoint (pth file)")
     parser.add_argument("--dataset", type=str, default="m3cot", choices=["m3cot", "scienceqa"], help="Dataset to evaluate (m3cot or scienceqa)")
+    parser.add_argument("--model_base_path", type=str, default="/home/ma-user/work/lbx/models/Qwen2-VL-2B-Instruct", help="Path to the base Qwen2-VL model (2B or 7B)")
     
     args = parser.parse_args()
 
     # 1. 加载模型
-    model, processor, tokenizer = load_inference_model(args.checkpoint)
+    model, processor, tokenizer = load_inference_model(args.checkpoint, args.model_base_path)
 
     # 2. 根据参数选择评测数据集
     if args.dataset == "m3cot":

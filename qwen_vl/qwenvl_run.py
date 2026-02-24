@@ -792,6 +792,22 @@ def main():
 
     # config读取
     configs = Config(config_dict)
+
+    # ================= [新增代码] 开始 =================
+    # 动态构建实验名称，格式为: {数据集}_qwen2vl_{模型大小}_IVTLR
+    # 这样每次修改 yaml 中的 dataset_name 或 model_type，输出目录会自动更新
+    dataset_name = getattr(configs, "dataset_name", "m3cot")
+    model_type = getattr(configs, "model_type", "7B")
+    
+    new_name = f"{dataset_name}_qwen2vl_{model_type}_IVTLR"
+    
+    # 如果想保留 yaml 里自定义的 name 前缀，也可以做拼接，这里建议直接覆盖以保证规范
+    if configs.name != new_name:
+        print(f"[Config Auto-Update] Changing experiment name from '{configs.name}' to '{new_name}'")
+        configs.name = new_name
+    # ================= [新增代码] 结束 =================
+
+    
     set_seed(configs.seed)
     save_dir = os.path.join(configs.save_path, configs.name)
 
@@ -818,24 +834,33 @@ def main():
         
     # 模型、分词器加载，新增token    
     print("start loading model")
+    # [修改] 解析模型路径
+    target_model_type = getattr(configs, "model_type", "7B") # 默认为 7B
+    if target_model_type == "2B":
+        model_path = getattr(configs, "model_path_2b", "/home/ma-user/work/lbx/models/Qwen2-VL-2B-Instruct")
+    else:
+        model_path = getattr(configs, "model_path_7b", "/home/ma-user/work/lbx/models/Qwen2-VL-7B-Instruct")
+    
+    print(f"Selected Model: {target_model_type}, Path: {model_path}")
+    
     # Todo:modify model and Tokenizer
     # model = Qwen2VLForConditionalGeneration.from_pretrained(
     #     "Qwen/Qwen2-VL-7B-Instruct", device_map="cuda", torch_dtype=torch.bfloat16, trust_remote_code=True, attn_implementation="eager"
     # )
     model = Qwen2VLForConditionalGeneration.from_pretrained(
-    "/home/ma-user/work/lbx/models/Qwen2-VL-7B-Instruct", device_map="cuda", torch_dtype=torch.bfloat16, trust_remote_code=True, attn_implementation="eager"
+    model_path, device_map="cuda", torch_dtype=torch.bfloat16, trust_remote_code=True, attn_implementation="eager"
 )
     model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
     optimizer = AdamW(filter(lambda p: p.requires_grad, model.parameters()), lr=configs.lr)
     #tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2-VL-7B-Instruct", use_fast=False, trust_remote_code=True)
-    tokenizer = AutoTokenizer.from_pretrained("/home/ma-user/work/lbx/models/Qwen2-VL-7B-Instruct", use_fast=False, trust_remote_code=True)
+    tokenizer = AutoTokenizer.from_pretrained(model_path, use_fast=False, trust_remote_code=True)
     tokenizer.padding_side = "right"
     tokenizer.pad_token = tokenizer.eos_token
     tokenizer.add_tokens("<|start-latent|>")
     tokenizer.add_tokens("<|end-latent|>")
     tokenizer.add_tokens("<|latent|>")
     # processor = AutoProcessor.from_pretrained("Qwen/Qwen2-VL-7B-Instruct", tokenizer=tokenizer)
-    processor = AutoProcessor.from_pretrained("/home/ma-user/work/lbx/models/Qwen2-VL-7B-Instruct", tokenizer=tokenizer)
+    processor = AutoProcessor.from_pretrained(model_path, tokenizer=tokenizer)
     latent_id = tokenizer.convert_tokens_to_ids("<|latent|>")
     print("latent_id: ", latent_id)
     start_id = tokenizer.convert_tokens_to_ids("<|start-latent|>")
@@ -864,7 +889,7 @@ def main():
     
     model.print_trainable_parameters()
 
-    model = IVTLR(model, latent_id, start_id, end_id, tokenizer.eos_token_id, image_token_id, visual_start_id, visual_end_id)
+    model = IVTLR(model, latent_id, start_id, end_id, tokenizer.eos_token_id, image_token_id, visual_start_id, visual_end_id,model_path=model_path)
 
     # deepspeed包装模型
     print(f"Running Deepspeed on rank = {rank}, world size = {world_size}")
