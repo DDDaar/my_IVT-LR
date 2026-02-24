@@ -1009,9 +1009,11 @@ def main():
                             + "\n"
                         )
                     text_str += "====" * 10 + "\n"
-
+                # log
                 text_table.add_data(total_train_steps, text_str)
+                wandb_run.log({"training_samples": text_table})
 
+                
             total_train_steps += 1
             batch = {
                 key: batch[key].to(rank) for key in batch.keys() if key != "idx"

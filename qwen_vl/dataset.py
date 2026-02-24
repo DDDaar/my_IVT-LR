@@ -23,9 +23,10 @@ logging.basicConfig(
     datefmt='%Y-%m-%d %H:%M:%S' 
 )
 
+#主函数，处理原始数据集，将文本tokenize，并处理图像数据。
 
 def get_dataset(dataset, tokenizer, processor, max_size=1000000000):
-
+    # 单个样本处理
     def tokenize_sample(sample, max_length=3400):
         image = sample["image"]
         pixel_values = sample["pixel_values"]
@@ -33,17 +34,18 @@ def get_dataset(dataset, tokenizer, processor, max_size=1000000000):
         
         processed_question = sample["question"]
 
-        # Tokenize question
+        # Tokenize question，tokenize后的input_id
         question_tokenized = sample["input_ids"]
         #logging.debug(f"step length: {len(sample["steps"])}")
         logging.debug(f"step length: {len(sample['steps'])}")
-        # Tokenize steps
+        # Tokenize steps,每一个step的内容都tokenize
         steps_tokenized = [
             tokenizer.encode(s + "\n", add_special_tokens=False)
             for s in sample["steps"]
         ]
         sample["answer"] = str(sample["answer"])
         # Tokenize answer
+        # 答案tokenize
         answer_tokenized = tokenizer.encode(
             "Therefore, the answer is " + sample["answer"], add_special_tokens=False
         ) + [tokenizer.eos_token_id]
@@ -56,6 +58,7 @@ def get_dataset(dataset, tokenizer, processor, max_size=1000000000):
         )
         print("question length: ", len(question_tokenized))
         # If total length exceeds max_length, truncate steps_tokenized
+        # 计算应该保留的总token数（总长度减去超出的部分）
         if total_length > max_length:
             # Calculate how much to reduce
             excess_length = total_length - max_length
@@ -83,7 +86,11 @@ def get_dataset(dataset, tokenizer, processor, max_size=1000000000):
 
     dataset = dataset.map(lambda example, idx: {"idx": idx}, with_indices=True)
     data = dataset
-
+    # 功能：分布式环境下的处理
+    # 只在主进程(rank=0)上处理数据
+    # 使用32个进程并行处理
+    # 将处理后的数据广播给其他进程
+    # 移除原始特征列
     if torch.cuda.device_count() > 1:
         if dist.get_rank() == 0:
             processed_dataset = [
@@ -104,6 +111,9 @@ def get_dataset(dataset, tokenizer, processor, max_size=1000000000):
     return dataset
 
 
+# 通过在左侧手动填充，确保一个 Batch 中所有样本的第一个 latent_id 都在同一个索引位置
+# 保证了在 Batch 维度上，每一行的 Latent 标记在纵向上是完全对齐的
+# 填充位的 position_id 被设为了 0。这意味着填充后的前两个 token（<pad> 和 A）的 position_id 都是 0
 @dataclass
 class MyCollator:
 
@@ -114,13 +124,13 @@ class MyCollator:
     def __call__(self, features, return_tensors=None):
 
         assert self.tokenizer.padding_side == "right"
-
+        #找到每个样本中第一个潜变量token的位置 
         earliest_latent = [
             feature["input_ids"].index(self.latent_id)
             for feature in features
             if self.latent_id in feature["input_ids"]
         ]
-
+        # 计算每个样本需要填充的数量，使潜变量位置对齐
         if len(earliest_latent) > 0:  
             latest_earliest_latent = max(earliest_latent)
             for feature in features:
@@ -140,6 +150,7 @@ class MyCollator:
                     feature["labels"] = [self.label_pad_token_id] * n_tok_pad + feature[
                         "labels"
                     ]
+                    #左侧pad位置，注意力掩码为0
                 feature["attention_mask"] = [0] * n_tok_pad + feature["attention_mask"]
 
         return_tensors = "pt"
@@ -213,8 +224,12 @@ def get_cot_latent_dataset(
     n_additional_tokens = 0 if no_special_marker else 2
 
     def process_dataset(sample):
+        # 正在训练的阶段
         scheduled_stage_to_train = scheduled_stage
-        
+
+        # 如果阶段超过最大限制
+        # 跳过所有步骤（只输出答案）
+        # 潜变量数量：根据配置决定是最大数量还是实际步骤数
         if scheduled_stage_to_train > configs.max_latent_stage:
             n_skip_steps = 10000  # skip all
             if configs.pad_latent_to_max:
@@ -225,11 +240,13 @@ def get_cot_latent_dataset(
                 )
 
         else:
+            # 跳过几个stage，所以使用几个latent token
             n_skip_steps, n_latent_tokens = (
                 scheduled_stage_to_train,
                 scheduled_stage_to_train,
             )
 
+        # 问题+latent token+除去skip阶段的cot过程
         tokens = (
             sample["question_tokenized"]
             + [latent_id] * n_latent_tokens
@@ -238,7 +255,10 @@ def get_cot_latent_dataset(
             )
             + sample["answer_tokenized"]
         )
-        
+
+        # labels: 问题和潜变量部分设为-100（不计算损失），其余部分计算损失
+        # attention_mask: 全部为1（都参与注意力计算）
+        # 保留图像信息
         return {
             "input_ids": tokens,
             "labels": [-100]
@@ -258,6 +278,7 @@ def get_cot_latent_dataset(
         }
 
     if torch.cuda.device_count() > 1:
+        # 在0号卡处理后广播到其他device
         if dist.get_rank() == 0:
             processed_dataset = base_dataset.map(
                 process_dataset, remove_columns=list(base_dataset.features), num_proc=32
