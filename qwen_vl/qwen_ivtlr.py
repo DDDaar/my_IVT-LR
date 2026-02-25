@@ -18,6 +18,7 @@ Outputs = namedtuple("Outputs", ["loss", "inputs_embeds", "logits"])
 MAX_N_LATENT = 4
 
 
+
 class IVTLR(nn.Module):
 
     def __init__(
