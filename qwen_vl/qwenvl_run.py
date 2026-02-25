@@ -798,8 +798,9 @@ def main():
     # 这样每次修改 yaml 中的 dataset_name 或 model_type，输出目录会自动更新
     dataset_name = getattr(configs, "dataset_name", "m3cot")
     model_type = getattr(configs, "model_type", "7B")
+    suffix = getattr(configs, "suffix", "")
     
-    new_name = f"{dataset_name}_qwen2vl_{model_type}_IVTLR"
+    new_name = f"{dataset_name}_qwen2vl_{model_type}_IVTLR{suffix}" 
     
     # 如果想保留 yaml 里自定义的 name 前缀，也可以做拼接，这里建议直接覆盖以保证规范
     if configs.name != new_name:
@@ -1037,6 +1038,7 @@ def main():
                 # log
                 text_table.add_data(total_train_steps, text_str)
                 wandb_run.log({"training_samples": text_table})
+                print(f'第{total_train_steps}步:\n{text_str}')
 
                 
             total_train_steps += 1
