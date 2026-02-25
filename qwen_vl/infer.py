@@ -655,20 +655,23 @@ def evaluate_m3cot(model, processor, output_path="output/qwen2vl_32.jsonl"):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Inference for IVT-LR (Qwen2-VL)")
-    parser.add_argument("--checkpoint", type=str, default='/home/ma-user/work/lbx/IVT-LR/qwen_vl/output/m3cot_qwen2vl_IVTLR/epoch_16_full_model_fp32.pth', help="Path to the model checkpoint (pth file)")
+    parser.add_argument("--checkpoint", type=str, default='/home/ma-user/work/lbx/IVT-LR/qwen_vl/output/m3cot_qwen2vl_2B_IVTLR/epoch_16_full_model_fp32.pth', help="Path to the model checkpoint (pth file)")
     parser.add_argument("--dataset", type=str, default="m3cot", choices=["m3cot", "scienceqa"], help="Dataset to evaluate (m3cot or scienceqa)")
-    parser.add_argument("--model_base_path", type=str, default="/home/ma-user/work/lbx/models/Qwen2-VL-7B-Instruct", help="Path to the base Qwen2-VL model (2B or 7B)")
+    parser.add_argument("--model_base_path", type=str, default="/home/ma-user/work/lbx/models/Qwen2-VL-2B-Instruct", help="Path to the base Qwen2-VL model (2B or 7B)")
+    parser.add_argument("--output_path", type=str, default="output/qwen2-vl-2b-m3cot.jsonl", help="Path to the base Qwen2-VL model (2B or 7B)")
     
     args = parser.parse_args()
-
+    output_path = args.output_path
+    
     # 1. 加载模型
     model, processor, tokenizer = load_inference_model(args.checkpoint, args.model_base_path)
 
+    
     # 2. 根据参数选择评测数据集
     if args.dataset == "m3cot":
-        evaluate_m3cot(model, processor)
+        evaluate_m3cot(model, processor,output_path)
     elif args.dataset == "scienceqa":
-        evaluate_scienceqa(model, processor)
+        evaluate_scienceqa(model, processor,output_path)
     else:
         print("Invalid dataset selected.")
 
