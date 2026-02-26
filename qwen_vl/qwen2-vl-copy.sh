@@ -19,4 +19,4 @@ deepspeed --master_port=29555 \
     qwenvl_run.py args/qwen.yaml \
     --deepspeed \
     --deepspeed_config ds_config.json \
-    2>&1 | tee qwenvl_output——2b.txt
+    2>&1 | tee qwenvl_output_2.txt
