@@ -65,7 +65,26 @@ class IVTLR(nn.Module):
         # self.processor = ChameleonProcessor.from_pretrained("facebook/chameleon-7b")
         
         #####################################################################
-        #增加全连接层进行注意力的融合，而不是简单平均各个head
+        # #增加全连接层进行注意力的融合，而不是简单平均各个head
+        # #1. 获取 num_heads
+        # # 大多数 HF 模型（Qwen2-VL, Chameleon, Llama）使用 .num_attention_heads
+        # # GPT-2 使用 .n_head
+        # if hasattr(self.base_causallm.config, "num_attention_heads"):
+        #     num_heads = self.base_causallm.config.num_attention_heads
+        # elif hasattr(self.base_causallm.config, "n_head"):
+        #     num_heads = self.base_causallm.config.n_head
+        # else:
+        #     raise ValueError("Cannot find number of attention heads in model config")
+            
+        # self.head_fusion = nn.Sequential(
+        #     nn.Linear(num_heads, 1), # 将多头权重融合为1个分数
+        #     nn.Sigmoid()
+        # )
+        # print('使用mlp层进行head注意力融合')
+        ####################################################################
+
+        ####################################################################
+
         #1. 获取 num_heads
         # 大多数 HF 模型（Qwen2-VL, Chameleon, Llama）使用 .num_attention_heads
         # GPT-2 使用 .n_head
@@ -75,14 +94,19 @@ class IVTLR(nn.Module):
             num_heads = self.base_causallm.config.n_head
         else:
             raise ValueError("Cannot find number of attention heads in model config")
-            
-        self.head_fusion = nn.Sequential(
-            nn.Linear(num_heads, 1), # 将多头权重融合为1个分数
-            nn.Sigmoid()
-        )
-        print('使用mlp层进行head注意力融合')
-        ####################################################################
 
+
+        if hasattr(self.base_causallm.config, "hidden_size"):
+            hidden_size = self.base_causallm.config.hidden_size
+        elif hasattr(self.base_causallm.config, "n_embd"):
+            hidden_size = self.base_causallm.config.n_embd
+            
+        
+        self.head_gate = nn.Sequential(
+            nn.Linear(hidden_size, num_heads), # 输入 latent hidden state，输出每个 head 的权重
+            nn.Softmax(dim=-1) # 保证权重和为 1
+        )
+        ####################################################################
         
     def forward(
         self,
@@ -210,48 +234,71 @@ class IVTLR(nn.Module):
 
                 all_logits.append(logits_this)
 
-                
+#######################################################################原始                
 #                 #   Top-K
 #                 avg_attn = torch.cat(attentions, dim=1).mean(dim=1)  # (B, seq_len) 将所有层的注意力矩阵在 heads（头）维度上拼接，(B, L * heads, seq_len, seq_len)---->(B, seq_len, seq_len)
 #                 current_seq_len = avg_attn.size(1) #seq长度
 
 
-################################################################################
-                # 使用刚加的模块：mlp选择
-                # --- [修改开始] 使用 head_fusion 层进行融合 ---
                 
-                # 1. 对每一层的注意力矩阵应用 head_fusion
+################################################################################
+                # # 使用刚加的模块：mlp选择
+                # # --- [修改开始] 使用 head_fusion 层进行融合 ---
+                
+                # # 1. 对每一层的注意力矩阵应用 head_fusion
+                # layer_fused_attns = []
+                # for layer_attn in attentions:
+                #     # layer_attn shape: (B, num_heads, S, S)
+                    
+                #     # 调整维度，将 num_heads 放到最后，以便 Linear 层处理
+                #     # permute -> (B, S, S, num_heads)
+                #     layer_attn_perm = layer_attn.permute(0, 2, 3, 1)
+                    
+                #     # 应用你的 head_fusion (Linear + Sigmoid)
+                #     # 输入: (..., num_heads) -> 输出: (..., 1)
+                #     # 结果 shape: (B, S, S, 1)
+                #     fused_score = self.head_fusion(layer_attn_perm)
+                    
+                #     # 去掉最后一维 -> (B, S, S)
+                #     layer_fused_attns.append(fused_score.squeeze(-1))
+
+                # # 2. 将各个层融合 (这里采用层间平均)
+                # # stack -> (num_layers, B, S, S)
+                # # mean(dim=0) -> (B, S, S)
+                # avg_attn = torch.stack(layer_fused_attns, dim=0).mean(dim=0)
+                
+                # # --- [修改结束] ---
+
+                # current_seq_len = avg_attn.size(1)
+################################################################################
+
+
+################################################################################
+                # 在 forward 循环中修改 (约 175 行附近)
+                # hidden_states: (B, Seq_Len, Hidden_Size)
+                # 我们关注的是产生 Attention 的那个 Latent Token，即位置 end-1
+                current_latent_vector = hidden_states[:, end-1, :] # (B, Hidden_Size)
+                
+                # 生成动态权重 (B, Num_Heads)
+                dynamic_head_weights = self.head_gate(current_latent_vector) 
+                dynamic_head_weights = dynamic_head_weights.unsqueeze(-1).unsqueeze(-1) # (B, Num_Heads, 1, 1)
+                
+                # 开始融合
                 layer_fused_attns = []
                 for layer_attn in attentions:
-                    # layer_attn shape: (B, num_heads, S, S)
+                    # layer_attn: (B, Num_Heads, S, S)
+                    # 我们只需要最后一行 (Latent Token 对其他 Token 的关注度)
+                    # 注意：原始代码取了 avg_attn[b, end-1]，我们在融合前就可以切片以节省显存，或者在融合后切片
                     
-                    # 调整维度，将 num_heads 放到最后，以便 Linear 层处理
-                    # permute -> (B, S, S, num_heads)
-                    layer_attn_perm = layer_attn.permute(0, 2, 3, 1)
-                    
-                    # 应用你的 head_fusion (Linear + Sigmoid)
-                    # 输入: (..., num_heads) -> 输出: (..., 1)
-                    # 结果 shape: (B, S, S, 1)
-                    fused_score = self.head_fusion(layer_attn_perm)
-                    
-                    # 去掉最后一维 -> (B, S, S)
-                    layer_fused_attns.append(fused_score.squeeze(-1))
-
-                # 2. 将各个层融合 (这里采用层间平均)
-                # stack -> (num_layers, B, S, S)
-                # mean(dim=0) -> (B, S, S)
-                avg_attn = torch.stack(layer_fused_attns, dim=0).mean(dim=0)
+                    # 加权求和: Sum(Attention * Weight)
+                    # (B, Num_Heads, S, S) * (B, Num_Heads, 1, 1) -> Sum dim=1 -> (B, S, S)
+                    weighted_attn = (layer_attn * dynamic_head_weights).sum(dim=1)
+                    layer_fused_attns.append(weighted_attn)
                 
-                # --- [修改结束] ---
-
+                # 层间融合 (依然可以先用平均，或者参考方案二)
+                avg_attn = torch.stack(layer_fused_attns, dim=0).mean(dim=0)
                 current_seq_len = avg_attn.size(1)
 ################################################################################
-
-
-                
-                
-                
-                
                 
 
                 select_image_embeds = []
