@@ -8,7 +8,7 @@ export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3
 export PYTHONUNBUFFERED=1
 export WANDB_API_KEY=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
 export HF_ENDPOINT=https://hf-mirror.com
-export HF_TOKEN="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"
+export HF_TOKEN=""
 
 # 进入目录
 # cd qwen_vl || exit
