@@ -499,10 +499,9 @@ class IVTLR(nn.Module):
                     # === 增加：使用直通估计器 (STE) 融合梯度 ===
                     # 正向传播时相当于 picked_embeds * 1.0，特征大小不变
                     # 反向传播时，梯度会流向 topk_probs，从而更新 q_proj 和 k_proj
-                    #ste_weight = (topk_probs - topk_probs.detach() + 1.0).unsqueeze(-1)
-                    #picked = picked_embeds * ste_weight
-                    #ste_weight = (topk_probs - topk_probs.detach() + 1.0).unsqueeze(-1)
-                    picked = picked_embeds
+                    ste_weight = (topk_probs - topk_probs.detach() + 1.0).unsqueeze(-1)
+                    picked = picked_embeds * ste_weight
+                    
                     select_image_embeds.append(picked)
 
                 # =====================================================================
