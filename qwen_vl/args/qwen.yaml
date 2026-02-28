@@ -3,12 +3,12 @@ save_path: /home/ma-user/work/lbx/IVT-LR/qwen_vl/output
 name: m3cot_qwen2vl_IVTLR
 
 # 添加数据集控制字段
-dataset_name: scienceqa # 选项: 'm3cot' 或 'scienceqa'
+dataset_name: m3cot # 选项: 'scienceqa' 或 'scienceqa'
 # --- [新增配置] ---
-model_type: "7B"  # 选项: "2B" 或 "7B"
+model_type: "2B"  # 选项: "2B" 或 "7B"
 model_path_2b: "/home/ma-user/work/lbx/models/Qwen2-VL-2B-Instruct" # 请修改为实际2B模型路径
 model_path_7b: "/home/ma-user/work/lbx/models/Qwen2-VL-7B-Instruct" # 请修改为实际7B模型路径
-suffix: 'add_headfusion_mlp_head_gate(hidden_size, num_heads)'
+suffix: 'add_headfusion_mlp_head_gate(hidden_size, num_heads)_layer_independent'
 
 # -----------------
 epochs_per_stage: 4

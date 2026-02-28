@@ -225,7 +225,9 @@ class IVTLR(nn.Module):
                     )
 
                 logits_this = outputs.logits     #当前步的logits              
-                hidden_states = outputs.hidden_states[-1]     #最后一层的隐藏状态  
+                hidden_states = outputs.hidden_states[-1]     # 最后一层的隐藏状态 
+                
+                all_hidden_states = outputs.hidden_states  # 所有层的隐藏状态
                 
                 
                 
@@ -274,33 +276,61 @@ class IVTLR(nn.Module):
 
 
 ################################################################################
-                # 在 forward 循环中修改 (约 175 行附近)
-                # hidden_states: (B, Seq_Len, Hidden_Size)
-                # 我们关注的是产生 Attention 的那个 Latent Token，即位置 end-1
-                current_latent_vector = hidden_states[:, end-1, :] # (B, Hidden_Size)
+## 使用hiddenstate->head提取各个head的权重进行加权求和
+#                 # 在 forward 循环中修改 (约 175 行附近)
+#                 # hidden_states: (B, Seq_Len, Hidden_Size)
+#                 # 我们关注的是产生 Attention 的那个 Latent Token，即位置 end-1
+#                 current_latent_vector = hidden_states[:, end-1, :] # (B, Hidden_Size)
                 
-                # 生成动态权重 (B, Num_Heads)
-                dynamic_head_weights = self.head_gate(current_latent_vector) 
-                dynamic_head_weights = dynamic_head_weights.unsqueeze(-1).unsqueeze(-1) # (B, Num_Heads, 1, 1)
+#                 # 生成动态权重 (B, Num_Heads)
+#                 dynamic_head_weights = self.head_gate(current_latent_vector) 
+#                 dynamic_head_weights = dynamic_head_weights.unsqueeze(-1).unsqueeze(-1) # (B, Num_Heads, 1, 1)
                 
-                # 开始融合
-                layer_fused_attns = []
-                for layer_attn in attentions:
-                    # layer_attn: (B, Num_Heads, S, S)
-                    # 我们只需要最后一行 (Latent Token 对其他 Token 的关注度)
-                    # 注意：原始代码取了 avg_attn[b, end-1]，我们在融合前就可以切片以节省显存，或者在融合后切片
+#                 # 开始融合
+#                 layer_fused_attns = []
+#                 for layer_attn in attentions:
+#                     # layer_attn: (B, Num_Heads, S, S)
+#                     # 我们只需要最后一行 (Latent Token 对其他 Token 的关注度)
+#                     # 注意：原始代码取了 avg_attn[b, end-1]，我们在融合前就可以切片以节省显存，或者在融合后切片
                     
-                    # 加权求和: Sum(Attention * Weight)
-                    # (B, Num_Heads, S, S) * (B, Num_Heads, 1, 1) -> Sum dim=1 -> (B, S, S)
-                    weighted_attn = (layer_attn * dynamic_head_weights).sum(dim=1)
-                    layer_fused_attns.append(weighted_attn)
+#                     # 加权求和: Sum(Attention * Weight)
+#                     # (B, Num_Heads, S, S) * (B, Num_Heads, 1, 1) -> Sum dim=1 -> (B, S, S)
+#                     weighted_attn = (layer_attn * dynamic_head_weights).sum(dim=1)
+#                     layer_fused_attns.append(weighted_attn)
                 
-                # 层间融合 (依然可以先用平均，或者参考方案二)
-                avg_attn = torch.stack(layer_fused_attns, dim=0).mean(dim=0)
-                current_seq_len = avg_attn.size(1)
+#                 # 层间融合 (依然可以先用平均，或者参考方案二)
+#                 avg_attn = torch.stack(layer_fused_attns, dim=0).mean(dim=0)
+#                 current_seq_len = avg_attn.size(1)
 ################################################################################
                 
 
+    
+
+    
+################################################################################
+# 开始：逐层独立的 Head 门控融合，hiddenstate->head
+                
+                layer_fused_attns = []
+                
+                for layer_idx, layer_attn in enumerate(attentions):
+                    # 获取当前层【输入】的隐藏状态 (即上一层的输出) 作为当前层门控的输入
+                    # 你也可以使用 all_hidden_states[layer_idx + 1] 作为当前层【输出】的隐藏状态
+                    current_layer_latent = all_hidden_states[layer_idx][:, end-1, :] # (B, Hidden_Size)
+                    
+                    # 使用当前层的隐藏状态，生成当前层专属的各个 Head 权重
+                    dynamic_head_weights = self.head_gate(current_layer_latent) # (B, Num_Heads)
+                    dynamic_head_weights = dynamic_head_weights.unsqueeze(-1).unsqueeze(-1) # (B, Num_Heads, 1, 1)
+                    
+                    # 加权求和: Sum(Attention * Weight) -> (B, S, S)
+                    weighted_attn = (layer_attn * dynamic_head_weights).sum(dim=1)
+                    layer_fused_attns.append(weighted_attn)
+                
+                # 层间融合：依然使用最基础的平均方式
+                avg_attn = torch.stack(layer_fused_attns, dim=0).mean(dim=0)
+                current_seq_len = avg_attn.size(1)
+
+################################################################################
+    
                 select_image_embeds = []
 
                 for b in range(B):
