@@ -1049,8 +1049,19 @@ def main():
             outputs = model_engine(**batch)
             loss = outputs.loss
             print(f"loss: {loss}")
+            
+           # === 测试点：记录更新前的权重 ===
+            old_weight = model_engine.module.visual_q_proj.weight.detach().clone()
+            
             model_engine.backward(loss)
             model_engine.step()
+            
+            # === 测试点：检查权重是否更新 ===
+            new_weight = model_engine.module.visual_q_proj.weight.detach().clone()
+            diff = (new_weight - old_weight).abs().sum().item()
+            if rank == 0:
+                print(f"visual_q_proj 权重变化量: {diff}")
+            
             
             if wandb_run and rank == 0:
                 log_dict = {

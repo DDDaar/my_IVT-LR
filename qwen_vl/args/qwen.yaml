@@ -23,7 +23,7 @@ bf16: True
 # 原本是2,m3cot用的4，后面都用2吧？
 batch_size_training: 2
 
-debug: False
+debug: True
 gradient_accumulation_steps: 8
 num_epochs: 16
 lr: !!float "4e-5"

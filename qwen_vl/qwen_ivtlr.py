@@ -84,29 +84,50 @@ class IVTLR(nn.Module):
         ####################################################################
 
         ####################################################################
+        #魔改2、3
+        # #1. 获取 num_heads
+        # # 大多数 HF 模型（Qwen2-VL, Chameleon, Llama）使用 .num_attention_heads
+        # # GPT-2 使用 .n_head
+        # if hasattr(self.base_causallm.config, "num_attention_heads"):
+        #     num_heads = self.base_causallm.config.num_attention_heads
+        # elif hasattr(self.base_causallm.config, "n_head"):
+        #     num_heads = self.base_causallm.config.n_head
+        # else:
+        #     raise ValueError("Cannot find number of attention heads in model config")
 
-        #1. 获取 num_heads
-        # 大多数 HF 模型（Qwen2-VL, Chameleon, Llama）使用 .num_attention_heads
-        # GPT-2 使用 .n_head
-        if hasattr(self.base_causallm.config, "num_attention_heads"):
-            num_heads = self.base_causallm.config.num_attention_heads
-        elif hasattr(self.base_causallm.config, "n_head"):
-            num_heads = self.base_causallm.config.n_head
-        else:
-            raise ValueError("Cannot find number of attention heads in model config")
 
+        # if hasattr(self.base_causallm.config, "hidden_size"):
+        #     hidden_size = self.base_causallm.config.hidden_size
+        # elif hasattr(self.base_causallm.config, "n_embd"):
+        #     hidden_size = self.base_causallm.config.n_embd
+            
+        
+        # self.head_gate = nn.Sequential(
+        #     nn.Linear(hidden_size, num_heads), # 输入 latent hidden state，输出每个 head 的权重
+        #     nn.Softmax(dim=-1) # 保证权重和为 1
+        # )
+        ####################################################################
 
+    
+        ####################################################################
+        #魔改4
+        # ---------- 替换掉之前的 head_gate 逻辑 ----------
         if hasattr(self.base_causallm.config, "hidden_size"):
             hidden_size = self.base_causallm.config.hidden_size
         elif hasattr(self.base_causallm.config, "n_embd"):
             hidden_size = self.base_causallm.config.n_embd
+        else:
+            raise ValueError("Cannot find hidden size in model config")
             
-        
-        self.head_gate = nn.Sequential(
-            nn.Linear(hidden_size, num_heads), # 输入 latent hidden state，输出每个 head 的权重
-            nn.Softmax(dim=-1) # 保证权重和为 1
-        )
+        # 引入可学习的视觉选择器 (交叉注意力)
+        # 降维以减少计算量并防止过拟合，例如降至 hidden_size 的 1/4
+        embed_dim = hidden_size // 4 
+        self.visual_q_proj = nn.Linear(hidden_size, embed_dim)
+        self.visual_k_proj = nn.Linear(hidden_size, embed_dim)
+        self.temperature = embed_dim ** 0.5
+        # ------------------------------------------------
         ####################################################################
+        
         
     def forward(
         self,
@@ -237,14 +258,39 @@ class IVTLR(nn.Module):
                 all_logits.append(logits_this)
 
 #######################################################################原始                
-#                 #   Top-K
-#                 avg_attn = torch.cat(attentions, dim=1).mean(dim=1)  # (B, seq_len) 将所有层的注意力矩阵在 heads（头）维度上拼接，(B, L * heads, seq_len, seq_len)---->(B, seq_len, seq_len)
-#                 current_seq_len = avg_attn.size(1) #seq长度
+               #  #   Top-K
+               #  avg_attn = torch.cat(attentions, dim=1).mean(dim=1)  # (B, seq_len) 将所有层的注意力矩阵在 heads（头）维度上拼接，(B, L * heads, seq_len, seq_len)---->(B, seq_len, seq_len)
+               #  current_seq_len = avg_attn.size(1) #seq长度
 
+               #  select_image_embeds = []
 
+               #  for b in range(B):
+               #      #最后一个位置的注意力图
+               #      last_attn = avg_attn[b, end - 1]  # shape=(seq_len,)
+               #      vs, ve = vs_pos_per_batch[b], ve_pos_per_batch[b]
+               #      scores = last_attn.clone()
+                    
+               #      allowed_positions = image_mask[b, :current_seq_len]  # shape=(S,)
+               #      invalid = ~allowed_positions
+               #      #将非图像位置的分数设为负无穷，确保不会被选中
+               #      scores[invalid] = float("-inf")
+
+               #      rel_scores = scores[vs+1 : ve]  # (image_len,)
+               #      #选择图像token中的topk个
+               #      topk_rel = rel_scores.topk(self.num_selected_patches, sorted=False)[1]  # rel idx
+               #      abs_idxs = (vs + 1) + topk_rel
+               #      logging.debug(f"topk_rel: {topk_rel}")
+               #      logging.debug(f"abs idx: {abs_idxs}")
+               #      image_mask[b, abs_idxs] = False
+
+               #      #提取对应位置的embedding
+               #      picked = inputs_embeds[b, abs_idxs, :]  # (K, D)
+               #      select_image_embeds.append(picked)
+               # #截止到'避免梯度传播'前面
+                    
                 
 ################################################################################
-                # # 使用刚加的模块：mlp选择
+                # # 使用刚加的模块：mlp选择，魔改1
                 # # --- [修改开始] 使用 head_fusion 层进行融合 ---
                 
                 # # 1. 对每一层的注意力矩阵应用 head_fusion
@@ -272,11 +318,36 @@ class IVTLR(nn.Module):
                 # # --- [修改结束] ---
 
                 # current_seq_len = avg_attn.size(1)
+
+                # select_image_embeds = []
+
+                # for b in range(B):
+                #     #最后一个位置的注意力图
+                #     last_attn = avg_attn[b, end - 1]  # shape=(seq_len,)
+                #     vs, ve = vs_pos_per_batch[b], ve_pos_per_batch[b]
+                #     scores = last_attn.clone()
+                    
+                #     allowed_positions = image_mask[b, :current_seq_len]  # shape=(S,)
+                #     invalid = ~allowed_positions
+                #     #将非图像位置的分数设为负无穷，确保不会被选中
+                #     scores[invalid] = float("-inf")
+
+                #     rel_scores = scores[vs+1 : ve]  # (image_len,)
+                #     #选择图像token中的topk个
+                #     topk_rel = rel_scores.topk(self.num_selected_patches, sorted=False)[1]  # rel idx
+                #     abs_idxs = (vs + 1) + topk_rel
+                #     logging.debug(f"topk_rel: {topk_rel}")
+                #     logging.debug(f"abs idx: {abs_idxs}")
+                #     image_mask[b, abs_idxs] = False
+
+                #     #提取对应位置的embedding
+                #     picked = inputs_embeds[b, abs_idxs, :]  # (K, D)
+                #     select_image_embeds.append(picked)
 ################################################################################
 
 
 ################################################################################
-## 使用hiddenstate->head提取各个head的权重进行加权求和
+## 使用hiddenstate->head提取各个head的权重进行加权求和，魔改2
 #                 # 在 forward 循环中修改 (约 175 行附近)
 #                 # hidden_states: (B, Seq_Len, Hidden_Size)
 #                 # 我们关注的是产生 Attention 的那个 Latent Token，即位置 end-1
@@ -298,65 +369,148 @@ class IVTLR(nn.Module):
 #                     weighted_attn = (layer_attn * dynamic_head_weights).sum(dim=1)
 #                     layer_fused_attns.append(weighted_attn)
                 
-#                 # 层间融合 (依然可以先用平均，或者参考方案二)
-#                 avg_attn = torch.stack(layer_fused_attns, dim=0).mean(dim=0)
-#                 current_seq_len = avg_attn.size(1)
-################################################################################
-                
+                # # 层间融合 (依然可以先用平均，或者参考方案二)
+                # avg_attn = torch.stack(layer_fused_attns, dim=0).mean(dim=0)
+                # current_seq_len = avg_attn.size(1)
 
-    
+                # select_image_embeds = []
 
-    
-    
-################################################################################
-# 开始：逐层独立的 Head 门控融合，hiddenstate->head
-                
-                layer_fused_attns = []
-                
-                for layer_idx, layer_attn in enumerate(attentions):
-                    # 获取当前层【输入】的隐藏状态 (即上一层的输出) 作为当前层门控的输入
-                    # 你也可以使用 all_hidden_states[layer_idx + 1] 作为当前层【输出】的隐藏状态
-                    current_layer_latent = all_hidden_states[layer_idx][:, end-1, :] # (B, Hidden_Size)
+                # for b in range(B):
+                #     #最后一个位置的注意力图
+                #     last_attn = avg_attn[b, end - 1]  # shape=(seq_len,)
+                #     vs, ve = vs_pos_per_batch[b], ve_pos_per_batch[b]
+                #     scores = last_attn.clone()
                     
-                    # 使用当前层的隐藏状态，生成当前层专属的各个 Head 权重
-                    dynamic_head_weights = self.head_gate(current_layer_latent) # (B, Num_Heads)
-                    dynamic_head_weights = dynamic_head_weights.unsqueeze(-1).unsqueeze(-1) # (B, Num_Heads, 1, 1)
-                    
-                    # 加权求和: Sum(Attention * Weight) -> (B, S, S)
-                    weighted_attn = (layer_attn * dynamic_head_weights).sum(dim=1)
-                    layer_fused_attns.append(weighted_attn)
+                #     allowed_positions = image_mask[b, :current_seq_len]  # shape=(S,)
+                #     invalid = ~allowed_positions
+                #     #将非图像位置的分数设为负无穷，确保不会被选中
+                #     scores[invalid] = float("-inf")
+
+                #     rel_scores = scores[vs+1 : ve]  # (image_len,)
+                #     #选择图像token中的topk个
+                #     topk_rel = rel_scores.topk(self.num_selected_patches, sorted=False)[1]  # rel idx
+                #     abs_idxs = (vs + 1) + topk_rel
+                #     logging.debug(f"topk_rel: {topk_rel}")
+                #     logging.debug(f"abs idx: {abs_idxs}")
+                #     image_mask[b, abs_idxs] = False
+
+                #     #提取对应位置的embedding
+                #     picked = inputs_embeds[b, abs_idxs, :]  # (K, D)
+                #     select_image_embeds.append(picked)
+################################################################################
                 
-                # 层间融合：依然使用最基础的平均方式
-                avg_attn = torch.stack(layer_fused_attns, dim=0).mean(dim=0)
-                current_seq_len = avg_attn.size(1)
+
+    
+
+    
+    
+################################################################################
+# # 开始：逐层独立的 Head 门控融合，hiddenstate->head，魔改3
+                
+                # layer_fused_attns = []
+                
+                # for layer_idx, layer_attn in enumerate(attentions):
+                #     # 获取当前层【输入】的隐藏状态 (即上一层的输出) 作为当前层门控的输入
+                #     # 你也可以使用 all_hidden_states[layer_idx + 1] 作为当前层【输出】的隐藏状态
+                #     current_layer_latent = all_hidden_states[layer_idx][:, end-1, :] # (B, Hidden_Size)
+                    
+                #     # 使用当前层的隐藏状态，生成当前层专属的各个 Head 权重
+                #     dynamic_head_weights = self.head_gate(current_layer_latent) # (B, Num_Heads)
+                #     dynamic_head_weights = dynamic_head_weights.unsqueeze(-1).unsqueeze(-1) # (B, Num_Heads, 1, 1)
+                    
+                #     # 加权求和: Sum(Attention * Weight) -> (B, S, S)
+                #     weighted_attn = (layer_attn * dynamic_head_weights).sum(dim=1)
+                #     layer_fused_attns.append(weighted_attn)
+                
+                # #层间融合：依然使用最基础的平均方式
+                # avg_attn = torch.stack(layer_fused_attns, dim=0).mean(dim=0)
+                # current_seq_len = avg_attn.size(1)
+
+                # select_image_embeds = []
+
+                # for b in range(B):
+                #     #最后一个位置的注意力图
+                #     last_attn = avg_attn[b, end - 1]  # shape=(seq_len,)
+                #     vs, ve = vs_pos_per_batch[b], ve_pos_per_batch[b]
+                #     scores = last_attn.clone()
+                    
+                #     allowed_positions = image_mask[b, :current_seq_len]  # shape=(S,)
+                #     invalid = ~allowed_positions
+                #     #将非图像位置的分数设为负无穷，确保不会被选中
+                #     scores[invalid] = float("-inf")
+
+                #     rel_scores = scores[vs+1 : ve]  # (image_len,)
+                #     #选择图像token中的topk个
+                #     topk_rel = rel_scores.topk(self.num_selected_patches, sorted=False)[1]  # rel idx
+                #     abs_idxs = (vs + 1) + topk_rel
+                #     logging.debug(f"topk_rel: {topk_rel}")
+                #     logging.debug(f"abs idx: {abs_idxs}")
+                #     image_mask[b, abs_idxs] = False
+
+                #     #提取对应位置的embedding
+                #     picked = inputs_embeds[b, abs_idxs, :]  # (K, D)
+                #     select_image_embeds.append(picked)
 
 ################################################################################
-    
+                # =====================================================================
+                # 开始：使用可学习视觉选择器 (Cross-Attention) 选择 Top-K Patches
+                # =====================================================================
+                
+# 1. 提取当前 Latent Token 的隐藏状态作为 Query -> (B, 1, D)
+                latent_hidden = hidden_states[:, end-1:end, :] 
+                q = self.visual_q_proj(latent_hidden) # (B, 1, embed_dim)
+
                 select_image_embeds = []
 
                 for b in range(B):
-                    #最后一个位置的注意力图
-                    last_attn = avg_attn[b, end - 1]  # shape=(seq_len,)
                     vs, ve = vs_pos_per_batch[b], ve_pos_per_batch[b]
-                    scores = last_attn.clone()
                     
-                    allowed_positions = image_mask[b, :current_seq_len]  # shape=(S,)
-                    invalid = ~allowed_positions
-                    #将非图像位置的分数设为负无穷，确保不会被选中
-                    scores[invalid] = float("-inf")
+                    # === 【修复点】：切片获取当前样本 b 的 Query ===
+                    q_b = q[b:b+1, :, :] # (1, 1, embed_dim)
+                    
+                    # 2. 提取当前图片所有 Patch 的隐藏状态作为 Key -> (1, num_patches, D)
+                    image_hidden = hidden_states[b:b+1, vs+1:ve, :] 
+                    k = self.visual_k_proj(image_hidden) # (1, num_patches, embed_dim)
+                    
+                    # === 【修复点】：使用 q_b 计算，并用 [0, 0] 安全降维 ===
+                    # q_b: (1, 1, embed_dim) | k.transpose: (1, embed_dim, num_patches)
+                    # bmm 结果为 (1, 1, num_patches)，取 [0, 0] 后变为一维的 (num_patches,)
+                    scores = torch.bmm(q_b, k.transpose(1, 2))[0, 0] / self.temperature
+                    
+                    # 4. 屏蔽已经被之前的 Latent 选择过的 Patch
+                    allowed_positions = image_mask[b, vs+1:ve]
+                    scores[~allowed_positions] = float("-inf")
 
-                    rel_scores = scores[vs+1 : ve]  # (image_len,)
-                    #选择图像token中的topk个
-                    topk_rel = rel_scores.topk(self.num_selected_patches, sorted=False)[1]  # rel idx
+                    # === 增加：将 Score 转为概率分布，建立梯度图 ===
+                    probs = torch.softmax(scores, dim=-1)
+
+                    # 5. 取 Top-K 及其对应的概率
+                    topk_probs, topk_rel = probs.topk(self.num_selected_patches, sorted=False)
                     abs_idxs = (vs + 1) + topk_rel
+                    
                     logging.debug(f"topk_rel: {topk_rel}")
                     logging.debug(f"abs idx: {abs_idxs}")
+                    
                     image_mask[b, abs_idxs] = False
-
-                    #提取对应位置的embedding
-                    picked = inputs_embeds[b, abs_idxs, :]  # (K, D)
+                    
+                    # 6. 从原始 inputs_embeds 中提取对应的 patch 进行拼接
+                    picked_embeds = inputs_embeds[b, abs_idxs, :]  # (K, D)
+                    
+                    # === 增加：使用直通估计器 (STE) 融合梯度 ===
+                    # 正向传播时相当于 picked_embeds * 1.0，特征大小不变
+                    # 反向传播时，梯度会流向 topk_probs，从而更新 q_proj 和 k_proj
+                    #ste_weight = (topk_probs - topk_probs.detach() + 1.0).unsqueeze(-1)
+                    #picked = picked_embeds * ste_weight
+                    #ste_weight = (topk_probs - topk_probs.detach() + 1.0).unsqueeze(-1)
+                    picked = picked_embeds
                     select_image_embeds.append(picked)
 
+                # =====================================================================
+                # 结束：选择完毕，后面拼接 inputs_embeds_detached 等逻辑保持原有不变
+                # =====================================================================
+################################################################################
+
+   
                 #避免梯度传播
                 select_image_embeds = torch.stack(select_image_embeds, dim=0)  # (B, K, D)
                 inputs_embeds_detached = inputs_embeds.detach().clone()
