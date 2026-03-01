@@ -933,7 +933,7 @@ def main():
             
         # 使用 partial 传递 processor
         process_func = functools.partial(process_sqa_example, processor=processor)
-        train_dataset = train_dataset.map(process_func, num_proc=32)
+        train_dataset = train_dataset.map(process_func, num_proc=32,)
     
     elif dataset_name == "m3cot":
         dataset = load_dataset("LightChen2333/M3CoT")
@@ -1051,16 +1051,16 @@ def main():
             print(f"loss: {loss}")
             
            # === 测试点：记录更新前的权重 ===
-            old_weight = model_engine.module.visual_q_proj.weight.detach().clone()
+            old_weight = model_engine.module.head_gate[0].weight.detach().clone()
             
             model_engine.backward(loss)
             model_engine.step()
             
             # === 测试点：检查权重是否更新 ===
-            new_weight = model_engine.module.visual_q_proj.weight.detach().clone()
+            new_weight = model_engine.module.head_gate[0].weight.detach().clone()
             diff = (new_weight - old_weight).abs().sum().item()
             if rank == 0:
-                print(f"visual_q_proj 权重变化量: {diff}")
+                print(f"head_gate 权重变化量: {diff}")
             
             
             if wandb_run and rank == 0:
