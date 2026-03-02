@@ -1052,18 +1052,22 @@ def main():
             
            # === 测试点：记录更新前的权重 ===
             old_weight = model_engine.module.base_causallm.base_model.model.model.language_model.layers[27].mlp.up_proj.lora_B.default.weight.detach().clone()
-            old_weight2 =  model_engine.module.cross_attn.in_proj_weight
+            old_weight2 =  model_engine.module.cross_attn.in_proj_weight.detach().clone()
+            old_weight3 = model_engine.module.visual_proj[0].weight.detach().clone()
             model_engine.backward(loss)
             model_engine.step()
             
             # === 测试点：检查权重是否更新 ===
             new_weight = model_engine.module.base_causallm.base_model.model.model.language_model.layers[27].mlp.up_proj.lora_B.default.weight.detach().clone()
-            new_weight2 =  model_engine.module.cross_attn.in_proj_weight
+            new_weight2 =  model_engine.module.cross_attn.in_proj_weight.detach().clone()
+            new_weight3 = model_engine.module.visual_proj[0].weight.detach().clone()
             diff = (new_weight - old_weight).abs().sum().item()
             diff2 = (new_weight2 - old_weight2).abs().sum().item()
+            diff3 = (new_weight3 - old_weight3).abs().sum().item()
             if rank == 0:
                 print(f"layers.27.mlp.up_proj.lora_B.default.weight 权重变化量: {diff}")
                 print(f"cross_attn.in_proj_weight 权重变化量: {diff2}")
+                print(f"visual_proj[0].weight 权重变化量: {diff3}")
             
             if wandb_run and rank == 0:
                 log_dict = {
