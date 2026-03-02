@@ -1051,17 +1051,19 @@ def main():
             print(f"loss: {loss}")
             
            # === 测试点：记录更新前的权重 ===
-            old_weight = model_engine.module.head_gate[0].weight.detach().clone()
-            
+            old_weight = model_engine.module.base_causallm.base_model.model.model.language_model.layers[27].mlp.up_proj.lora_B.default.weight.detach().clone()
+            old_weight2 =  model_engine.module.cross_attn.in_proj_weight
             model_engine.backward(loss)
             model_engine.step()
             
             # === 测试点：检查权重是否更新 ===
-            new_weight = model_engine.module.head_gate[0].weight.detach().clone()
+            new_weight = model_engine.module.base_causallm.base_model.model.model.language_model.layers[27].mlp.up_proj.lora_B.default.weight.detach().clone()
+            new_weight2 =  model_engine.module.cross_attn.in_proj_weight
             diff = (new_weight - old_weight).abs().sum().item()
+            diff2 = (new_weight2 - old_weight2).abs().sum().item()
             if rank == 0:
-                print(f"head_gate 权重变化量: {diff}")
-            
+                print(f"layers.27.mlp.up_proj.lora_B.default.weight 权重变化量: {diff}")
+                print(f"cross_attn.in_proj_weight 权重变化量: {diff2}")
             
             if wandb_run and rank == 0:
                 log_dict = {
@@ -1081,9 +1083,10 @@ def main():
         dist.barrier()
 
         # 每个stage结束后，保存一次模型权重
+        #           # not configs.debug and 
+            
         if (
-            not configs.debug
-            and (epoch + 1) % 4 == 0
+             (epoch + 1) % 4 == 0
         ):
             
             epoch_save_dir = os.path.join(save_dir, f"epoch_{epoch+1}_checkpoint")

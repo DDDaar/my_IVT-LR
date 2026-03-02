@@ -12,7 +12,7 @@ export HF_TOKEN=""
 
 find /home/ma-user/.cache/huggingface/datasets/ -type f -name "*of_00032.arrow" -mmin +300 -delete
 export HF_DATASETS_CACHE="/home/ma-user/work/lbx/hf_data_cache"
-find /home/ma-user/work/lbx/hf_data_cache -type f -name "*.arrow" -mmin +300 -delete
+find /home/ma-user/work/lbx/hf_data_cache -type f -name "*of_00032.arrow" -mmin +300 -delete
 
 # 进入目录
 # cd qwen_vl || exit

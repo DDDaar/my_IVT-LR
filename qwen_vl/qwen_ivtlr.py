@@ -83,30 +83,30 @@ class IVTLR(nn.Module):
         # print('使用mlp层进行head注意力融合')
         ####################################################################
 
-        ####################################################################
-        #魔改2、3
-        #1. 获取 num_heads
-        # 大多数 HF 模型（Qwen2-VL, Chameleon, Llama）使用 .num_attention_heads
-        # GPT-2 使用 .n_head
-        if hasattr(self.base_causallm.config, "num_attention_heads"):
-            num_heads = self.base_causallm.config.num_attention_heads
-        elif hasattr(self.base_causallm.config, "n_head"):
-            num_heads = self.base_causallm.config.n_head
-        else:
-            raise ValueError("Cannot find number of attention heads in model config")
+#         ####################################################################
+#         #魔改2、3
+#         #1. 获取 num_heads
+#         # 大多数 HF 模型（Qwen2-VL, Chameleon, Llama）使用 .num_attention_heads
+#         # GPT-2 使用 .n_head
+#         if hasattr(self.base_causallm.config, "num_attention_heads"):
+#             num_heads = self.base_causallm.config.num_attention_heads
+#         elif hasattr(self.base_causallm.config, "n_head"):
+#             num_heads = self.base_causallm.config.n_head
+#         else:
+#             raise ValueError("Cannot find number of attention heads in model config")
 
 
-        if hasattr(self.base_causallm.config, "hidden_size"):
-            hidden_size = self.base_causallm.config.hidden_size
-        elif hasattr(self.base_causallm.config, "n_embd"):
-            hidden_size = self.base_causallm.config.n_embd
+#         if hasattr(self.base_causallm.config, "hidden_size"):
+#             hidden_size = self.base_causallm.config.hidden_size
+#         elif hasattr(self.base_causallm.config, "n_embd"):
+#             hidden_size = self.base_causallm.config.n_embd
             
         
-        self.head_gate = nn.Sequential(
-            nn.Linear(hidden_size, num_heads), # 输入 latent hidden state，输出每个 head 的权重
-            nn.Softmax(dim=-1) # 保证权重和为 1
-        )
-        ####################################################################
+#         self.head_gate = nn.Sequential(
+#             nn.Linear(hidden_size, num_heads), # 输入 latent hidden state，输出每个 head 的权重
+#             nn.Softmax(dim=-1) # 保证权重和为 1
+#         )
+#         ####################################################################
 
     
         ####################################################################
@@ -126,6 +126,37 @@ class IVTLR(nn.Module):
         # self.visual_k_proj = nn.Linear(hidden_size, embed_dim)
         # self.temperature = embed_dim ** 0.5
         # # ------------------------------------------------
+        ####################################################################
+        
+        
+        ####################################################################
+        #魔改5，直接融合成新的视觉特征，而不是复用输入的embedding
+        #1. 获取 num_heads
+        # 大多数 HF 模型（Qwen2-VL, Chameleon, Llama）使用 .num_attention_heads
+        # GPT-2 使用 .n_head
+        if hasattr(self.base_causallm.config, "num_attention_heads"):
+            num_heads = self.base_causallm.config.num_attention_heads
+        elif hasattr(self.base_causallm.config, "n_head"):
+            num_heads = self.base_causallm.config.n_head
+        else:
+            raise ValueError("Cannot find number of attention heads in model config")
+            
+        if hasattr(self.base_causallm.config, "hidden_size"):
+            hidden_size = self.base_causallm.config.hidden_size
+        elif hasattr(self.base_causallm.config, "n_embd"):
+            hidden_size = self.base_causallm.config.n_embd
+
+        
+        # 初始化 K 个可学习的 Query Tokens (代表你想提取的 K 个视觉特征)
+        self.num_selected_patches = num_selected_patches
+        self.visual_queries = nn.Parameter(torch.randn(1, self.num_selected_patches, hidden_size))
+        # 定义一个小型的 Cross-Attention 模块
+        self.cross_attn = nn.MultiheadAttention(embed_dim=hidden_size, num_heads=num_heads, batch_first=True)
+        self.visual_proj = nn.Sequential(
+            nn.Linear(hidden_size, hidden_size),
+            nn.GELU(),
+            nn.Linear(hidden_size, hidden_size)
+        )
         ####################################################################
         
         
@@ -245,7 +276,15 @@ class IVTLR(nn.Module):
                         use_cache=True,
                     )
 
-                logits_this = outputs.logits     #当前步的logits              
+                logits_this = outputs.logits     #当前步的logits    
+                
+                # --- 【新增检查点 2】 ---
+                if torch.isnan(logits_this).any():
+                    print(f"🚨 致命: 在 pass_idx {pass_idx}，LLM 前向传播输出的 logits 变成了 NaN!")
+                    print("这说明你拼接进去的图像特征导致了 LLM 内部算力溢出 (通常在 LayerNorm 或 Softmax 层)。")
+                    #import pdb; pdb.set_trace()
+                # -----------------------
+                
                 hidden_states = outputs.hidden_states[-1]     # 最后一层的隐藏状态 
                 
                 all_hidden_states = outputs.hidden_states  # 所有层的隐藏状态
@@ -288,6 +327,8 @@ class IVTLR(nn.Module):
                #      select_image_embeds.append(picked)
                # #截止到'避免梯度传播'前面
                     
+#######################################################################原始   
+                
                 
 ################################################################################
                 # # 使用刚加的模块：mlp选择，魔改1
@@ -346,73 +387,73 @@ class IVTLR(nn.Module):
 ################################################################################
 
 
-################################################################################
-# 使用hiddenstate->head提取各个head的权重进行加权求和，魔改2
-                # 在 forward 循环中修改 (约 175 行附近)
-                # hidden_states: (B, Seq_Len, Hidden_Size)
-                # 我们关注的是产生 Attention 的那个 Latent Token，即位置 end-1
-                current_latent_vector = hidden_states[:, end-1, :] # (B, Hidden_Size)
+# ################################################################################
+# # 使用hiddenstate->head提取各个head的权重进行加权求和，魔改2
+#                 # 在 forward 循环中修改 (约 175 行附近)
+#                 # hidden_states: (B, Seq_Len, Hidden_Size)
+#                 # 我们关注的是产生 Attention 的那个 Latent Token，即位置 end-1
+#                 current_latent_vector = hidden_states[:, end-1, :] # (B, Hidden_Size)
                 
-                # 生成动态权重 (B, Num_Heads)
-                dynamic_head_weights = self.head_gate(current_latent_vector) 
-                dynamic_head_weights = dynamic_head_weights.unsqueeze(-1).unsqueeze(-1) # (B, Num_Heads, 1, 1)
+#                 # 生成动态权重 (B, Num_Heads)
+#                 dynamic_head_weights = self.head_gate(current_latent_vector) 
+#                 dynamic_head_weights = dynamic_head_weights.unsqueeze(-1).unsqueeze(-1) # (B, Num_Heads, 1, 1)
                 
-                # 开始融合
-                layer_fused_attns = []
-                for layer_attn in attentions:
-                    # layer_attn: (B, Num_Heads, S, S)
-                    # 我们只需要最后一行 (Latent Token 对其他 Token 的关注度)
-                    # 注意：原始代码取了 avg_attn[b, end-1]，我们在融合前就可以切片以节省显存，或者在融合后切片
+#                 # 开始融合
+#                 layer_fused_attns = []
+#                 for layer_attn in attentions:
+#                     # layer_attn: (B, Num_Heads, S, S)
+#                     # 我们只需要最后一行 (Latent Token 对其他 Token 的关注度)
+#                     # 注意：原始代码取了 avg_attn[b, end-1]，我们在融合前就可以切片以节省显存，或者在融合后切片
                     
-                    # 加权求和: Sum(Attention * Weight)
-                    # (B, Num_Heads, S, S) * (B, Num_Heads, 1, 1) -> Sum dim=1 -> (B, S, S)
-                    weighted_attn = (layer_attn * dynamic_head_weights).sum(dim=1)
-                    layer_fused_attns.append(weighted_attn)
+#                     # 加权求和: Sum(Attention * Weight)
+#                     # (B, Num_Heads, S, S) * (B, Num_Heads, 1, 1) -> Sum dim=1 -> (B, S, S)
+#                     weighted_attn = (layer_attn * dynamic_head_weights).sum(dim=1)
+#                     layer_fused_attns.append(weighted_attn)
                 
-                # 层间融合 (依然可以先用平均，或者参考方案二)
-                avg_attn = torch.stack(layer_fused_attns, dim=0).mean(dim=0)
-                current_seq_len = avg_attn.size(1)
+#                 # 层间融合 (依然可以先用平均，或者参考方案二)
+#                 avg_attn = torch.stack(layer_fused_attns, dim=0).mean(dim=0)
+#                 current_seq_len = avg_attn.size(1)
 
-                select_image_embeds = []
+#                 select_image_embeds = []
 
-                for b in range(B):
-                    #最后一个位置的注意力图
-                    last_attn = avg_attn[b, end - 1]  # shape=(seq_len,)
-                    vs, ve = vs_pos_per_batch[b], ve_pos_per_batch[b]
-                    scores = last_attn.clone()
+#                 for b in range(B):
+#                     #最后一个位置的注意力图
+#                     last_attn = avg_attn[b, end - 1]  # shape=(seq_len,)
+#                     vs, ve = vs_pos_per_batch[b], ve_pos_per_batch[b]
+#                     scores = last_attn.clone()
                     
-                    allowed_positions = image_mask[b, :current_seq_len]  # shape=(S,)
-                    invalid = ~allowed_positions
-                    #将非图像位置的分数设为负无穷，确保不会被选中
-                    scores[invalid] = float("-inf")
+#                     allowed_positions = image_mask[b, :current_seq_len]  # shape=(S,)
+#                     invalid = ~allowed_positions
+#                     #将非图像位置的分数设为负无穷，确保不会被选中
+#                     scores[invalid] = float("-inf")
 
-                    rel_scores = scores[vs+1 : ve]  # (image_len,)
+#                     rel_scores = scores[vs+1 : ve]  # (image_len,)
 
-                    # 【核心修改点】同时保留 topk_scores，以此作为梯度的桥梁
-                    topk_scores, topk_rel = rel_scores.topk(self.num_selected_patches, sorted=False) 
+#                     # 【核心修改点】同时保留 topk_scores，以此作为梯度的桥梁
+#                     topk_scores, topk_rel = rel_scores.topk(self.num_selected_patches, sorted=False) 
 
-                    abs_idxs = (vs + 1) + topk_rel
-                    logging.debug(f"topk_rel: {topk_rel}")
-                    logging.debug(f"abs idx: {abs_idxs}")
-                    image_mask[b, abs_idxs] = False
+#                     abs_idxs = (vs + 1) + topk_rel
+#                     logging.debug(f"topk_rel: {topk_rel}")
+#                     logging.debug(f"abs idx: {abs_idxs}")
+#                     image_mask[b, abs_idxs] = False
 
-                    # #提取对应位置的embedding
-                    # picked = inputs_embeds[b, abs_idxs, :]  # (K, D)
-                    # select_image_embeds.append(picked)
+#                     # #提取对应位置的embedding
+#                     # picked = inputs_embeds[b, abs_idxs, :]  # (K, D)
+#                     # select_image_embeds.append(picked)
 
                     
-                    # 6. 从原始 inputs_embeds 中提取对应的 patch 特征
-                    picked_embeds = inputs_embeds[b, abs_idxs, :]  # (K, D)
-                    # 7. 【使用直通估计器 (STE) 融合梯度】
-                    # 正向传播：ste_weight 为 1.0，picked 特征值保持不变
-                    # 反向传播：梯度将通过 topk_scores 流向 rel_scores -> last_attn -> head_gate
-                    # 梯度会以 $1 \times \text{gradient}$ 的大小，完好无损地传递给 topk_scores，进而流向产生这个分数的 rel_scores 和 head_gate
-                    ste_weight = (topk_scores - topk_scores.detach() + 1.0).unsqueeze(-1)
-                    picked = picked_embeds * ste_weight
+#                     # 6. 从原始 inputs_embeds 中提取对应的 patch 特征
+#                     picked_embeds = inputs_embeds[b, abs_idxs, :]  # (K, D)
+#                     # 7. 【使用直通估计器 (STE) 融合梯度】
+#                     # 正向传播：ste_weight 为 1.0，picked 特征值保持不变
+#                     # 反向传播：梯度将通过 topk_scores 流向 rel_scores -> last_attn -> head_gate
+#                     # 梯度会以 $1 \times \text{gradient}$ 的大小，完好无损地传递给 topk_scores，进而流向产生这个分数的 rel_scores 和 head_gate
+#                     ste_weight = (topk_scores - topk_scores.detach() + 1.0).unsqueeze(-1)
+#                     picked = picked_embeds * ste_weight
                     
-                    select_image_embeds.append(picked)
+#                     select_image_embeds.append(picked)
                 
-################################################################################
+# ################################################################################
                 
 
     
@@ -524,9 +565,53 @@ class IVTLR(nn.Module):
 #                 # =====================================================================
 ################################################################################
 
-   
+
+
+###################################################################### 
+                #   魔改5，直接融合成新的视觉特征，而不是复用输入的embedding
+                #   Top-K
+                avg_attn = torch.cat(attentions, dim=1).mean(dim=1)  # (B, seq_len) 将所有层的注意力矩阵在 heads（头）维度上拼接，(B, L * heads, seq_len, seq_len)---->(B, seq_len, seq_len)
+                current_seq_len = avg_attn.size(1) #seq长度
+
+                select_image_embeds = []
+
+                for b in range(B):
+                    #最后一个位置的注意力图
+                    last_attn = avg_attn[b, end - 1]  # shape=(seq_len,)
+                    vs, ve = vs_pos_per_batch[b], ve_pos_per_batch[b]
+                    
+                    # 1. 提取当前图像的所有深层隐藏状态作为 Key 和 Value
+                    image_hidden = hidden_states[b:b+1, vs+1:ve, :] # (1, num_patches, D)
+
+                    # 2. 将当前 Latent Token 的状态加到可学习的 Query 上，融入当前的“思考上下文”
+                    current_latent = hidden_states[b:b+1, end-1:end, :] # (1, 1, D)
+                    q = self.visual_queries + current_latent # (1, K, D)
+
+                    # 3. 通过 Cross-Attention 软提取图像特征
+                    # 这样不仅可微，而且模型学会了"该看哪里就融合哪里"，完全不需要 STE
+                    fused_visual_tokens, _ = self.cross_attn(query=q, key=image_hidden, value=image_hidden)
+
+                    # 4. 经过一个 MLP 并作为选出的图像 Embeddings
+                    picked = self.visual_proj(fused_visual_tokens).squeeze(0) # (K, D)
+                    select_image_embeds.append(picked)
+
+                    # 注意：使用这种方法，你不需要再去修改 image_mask 将选过的位置设为 False，
+                    # 因为每次都是对全局图像基于当前 Latent 进行条件查询。
+                    #截止到'避免梯度传播'前面
+                    
+######################################################################
+                
+
                 #避免梯度传播
                 select_image_embeds = torch.stack(select_image_embeds, dim=0)  # (B, K, D)
+            
+                # --- 【新增检查点 1】 ---
+                if torch.isnan(select_image_embeds).any() or torch.isinf(select_image_embeds).any():
+                    print(f"🚨 警告: 在 pass_idx {pass_idx}，魔改5生成的 select_image_embeds 中发现了 NaN 或 Inf!")
+                    print(f"最大值: {select_image_embeds.max().item()}, 最小值: {select_image_embeds.min().item()}")
+                    #import pdb; pdb.set_trace()
+                # -----------------------
+            
                 inputs_embeds_detached = inputs_embeds.detach().clone()
                 for b in range(B):
                     if len(latent_lists[b]) > pass_idx:
@@ -667,9 +752,22 @@ class IVTLR(nn.Module):
             new_labels[:, -num_labels:] = labels
         shift_logits = logits[..., :-1, :].contiguous()
         shift_labels = new_labels[..., 1:].contiguous()
+        
+        # --- 【新增检查点 3】 ---
+        if torch.isnan(shift_logits).any():
+            print("🚨 警告: 最终拼接的 shift_logits 中包含 NaN！")
+            #import pdb; pdb.set_trace()
+        # -----------------------
+        
         loss_fct = CrossEntropyLoss(ignore_index=-100)
         loss = loss_fct(shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1))
 
+        # --- 【最终检查】 ---
+        if torch.isnan(loss):
+            print("🚨 训练崩溃: 计算出的 Loss 为 NaN！优化器将跳过更新。")
+            #import pdb; pdb.set_trace()
+        # -------------------
+        
         return Outputs(loss=loss, inputs_embeds=inputs_embeds, logits=logits)
 
 
