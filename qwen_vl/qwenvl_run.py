@@ -1047,6 +1047,11 @@ def main():
             }
 
             outputs,final_align_loss,ce_loss = model_engine(**batch)
+            
+            if final_align_loss is not None:
+                align_val = final_align_loss.detach().float().item() if isinstance(final_align_loss, torch.Tensor) else float(final_align_loss)
+                print(f'rank0:alignloss:{align_val}')
+            
             loss = outputs.loss
             print(f"loss: {loss}")
             
@@ -1070,12 +1075,20 @@ def main():
                 # print(f"visual_proj[0].weight 权重变化量: {diff3}")
             
             if wandb_run and rank == 0:
+                # 处理 ce_loss
+                if ce_loss is not None:
+                    ce_val = ce_loss.detach().float().item() if isinstance(ce_loss, torch.Tensor) else float(ce_loss)
+                    
+                # 处理 align_loss
+                if final_align_loss is not None:
+                    align_val = final_align_loss.detach().float().item() if isinstance(final_align_loss, torch.Tensor) else float(final_align_loss)
+                    print(f'rank0:alignloss:{align_val}')
                 log_dict = {
                     "train/epoch": epoch + 1,
                     "train/step": epoch * len(train_dataloader) + step,
                     "train/loss": loss.detach().float(),
-                    "train/align_loss_weighted":final_align_loss.detach().float(),
-                    "train/ce_loss":ce_loss.ce_loss.detach().float(),
+                    "train/align_loss_weighted":align_val,
+                    "train/ce_loss":ce_val,
                     "train/total_loss":loss.detach().float(),
                     # * configs.gradient_accumulation_steps,
                 }
@@ -1086,7 +1099,6 @@ def main():
                 f"Training Epoch: {epoch+1}/{configs.num_epochs}, batch {step}/{len(train_dataloader)} "
                 f"completed (loss: {round(float(loss.detach().float()), 4)}"
             )
-            print(f'alignloss:{final_align_loss.detach().float()}')
             print("finish")
 
         pbar.close()
