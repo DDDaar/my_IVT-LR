@@ -890,7 +890,7 @@ def main():
     
     model.print_trainable_parameters()
 
-    model = IVTLR(model, latent_id, start_id, end_id, tokenizer.eos_token_id, image_token_id, visual_start_id, visual_end_id,model_path=model_path)
+    model = IVTLR(model, latent_id, start_id, end_id, tokenizer.eos_token_id, image_token_id, visual_start_id, visual_end_id,model_path=model_path,align_loss_weight=getattr(configs, "align_loss_weight", 0.5))
 
     # deepspeed包装模型
     print(f"Running Deepspeed on rank = {rank}, world size = {world_size}")

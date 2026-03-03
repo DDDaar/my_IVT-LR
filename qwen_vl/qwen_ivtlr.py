@@ -34,6 +34,7 @@ class IVTLR(nn.Module):
         visual_end_id,
         num_selected_patches: int = 32,
         model_path: str = None,  # [新增参数]
+        align_loss_weight: float = 0.5,  # 1. 增加此参数，可设置默认值
     ):
 
         super(IVTLR, self).__init__()
@@ -180,7 +181,8 @@ class IVTLR(nn.Module):
             nn.Linear(hidden_size, hidden_size)
         )
         # 对齐损失的权重 (可调参数)
-        self.align_loss_weight = 0.5 
+        self.align_loss_weight = align_loss_weight
+        print(f'当前的align loss权重是{align_loss_weight}')
         # === [新增代码结束] ===
 ####################################################################
         
