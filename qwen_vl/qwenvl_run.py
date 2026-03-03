@@ -1046,43 +1046,49 @@ def main():
                 key: batch[key].to(rank) for key in batch.keys() if key != "idx"
             }
 
-            outputs = model_engine(**batch)
+            outputs,final_align_loss,ce_loss = model_engine(**batch)
             loss = outputs.loss
             print(f"loss: {loss}")
             
            # === 测试点：记录更新前的权重 ===
             old_weight = model_engine.module.base_causallm.base_model.model.model.language_model.layers[27].mlp.up_proj.lora_B.default.weight.detach().clone()
-            old_weight2 =  model_engine.module.cross_attn.in_proj_weight.detach().clone()
-            old_weight3 = model_engine.module.visual_proj[0].weight.detach().clone()
+            # old_weight2 =  model_engine.module.cross_attn.in_proj_weight.detach().clone()
+            # old_weight3 = model_engine.module.visual_proj[0].weight.detach().clone()
             model_engine.backward(loss)
             model_engine.step()
             
             # === 测试点：检查权重是否更新 ===
             new_weight = model_engine.module.base_causallm.base_model.model.model.language_model.layers[27].mlp.up_proj.lora_B.default.weight.detach().clone()
-            new_weight2 =  model_engine.module.cross_attn.in_proj_weight.detach().clone()
-            new_weight3 = model_engine.module.visual_proj[0].weight.detach().clone()
+            # new_weight2 =  model_engine.module.cross_attn.in_proj_weight.detach().clone()
+            # new_weight3 = model_engine.module.visual_proj[0].weight.detach().clone()
             diff = (new_weight - old_weight).abs().sum().item()
-            diff2 = (new_weight2 - old_weight2).abs().sum().item()
-            diff3 = (new_weight3 - old_weight3).abs().sum().item()
+            # diff2 = (new_weight2 - old_weight2).abs().sum().item()
+            # diff3 = (new_weight3 - old_weight3).abs().sum().item()
             if rank == 0:
                 print(f"layers.27.mlp.up_proj.lora_B.default.weight 权重变化量: {diff}")
-                print(f"cross_attn.in_proj_weight 权重变化量: {diff2}")
-                print(f"visual_proj[0].weight 权重变化量: {diff3}")
+                # print(f"cross_attn.in_proj_weight 权重变化量: {diff2}")
+                # print(f"visual_proj[0].weight 权重变化量: {diff3}")
             
             if wandb_run and rank == 0:
                 log_dict = {
                     "train/epoch": epoch + 1,
                     "train/step": epoch * len(train_dataloader) + step,
-                    "train/loss": loss.detach().float()
+                    "train/loss": loss.detach().float(),
+                    "train/align_loss_weighted":final_align_loss.detach().float(),
+                    "train/ce_loss":ce_loss.ce_loss.detach().float(),
+                    "train/total_loss":loss.detach().float(),
                     # * configs.gradient_accumulation_steps,
                 }
                 wandb_run.log(log_dict)
+                
             # print("line432")
             pbar.set_description(
                 f"Training Epoch: {epoch+1}/{configs.num_epochs}, batch {step}/{len(train_dataloader)} "
                 f"completed (loss: {round(float(loss.detach().float()), 4)}"
             )
+            print(f'alignloss:{final_align_loss.detach().float()}')
             print("finish")
+
         pbar.close()
         dist.barrier()
 

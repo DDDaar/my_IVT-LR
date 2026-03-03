@@ -8,7 +8,7 @@ dataset_name: scienceqa # 选项: 'scienceqa' 或 'scienceqa'
 model_type: "2B"  # 选项: "2B" 或 "7B"
 model_path_2b: "/home/ma-user/work/lbx/models/Qwen2-VL-2B-Instruct" # 请修改为实际2B模型路径
 model_path_7b: "/home/ma-user/work/lbx/models/Qwen2-VL-7B-Instruct" # 请修改为实际7B模型路径
-suffix: '_crossattn_fuse_new_embedding'
+suffix: '_text_hiddenstate_align_avg_cot_text_0.5'
 
 # -----------------
 epochs_per_stage: 4
@@ -23,7 +23,7 @@ bf16: True
 # 原本是2,m3cot用的4，后面都用2吧？
 batch_size_training: 2
 
-debug: False
+debug: True
 gradient_accumulation_steps: 8
 num_epochs: 16
 lr: !!float "4e-5"

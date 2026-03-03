@@ -124,6 +124,14 @@ class MyCollator:
     def __call__(self, features, return_tensors=None):
 
         assert self.tokenizer.padding_side == "right"
+        
+        
+        
+        # === [新增代码] 在交给官方 padding 前，先弹出 target_steps ===
+        target_steps_list = [feature.pop("target_steps", []) for feature in features if "target_steps" in feature]
+        
+        
+        
         #找到每个样本中第一个潜变量token的位置 
         earliest_latent = [
             feature["input_ids"].index(self.latent_id)
@@ -207,6 +215,39 @@ class MyCollator:
             batch["position_ids"] = torch.tensor(
                 batch["position_ids"], dtype=torch.int64
             )
+            
+            
+        # === [新增代码] 填充 target_steps ===
+        if target_steps_list and any(len(ts) > 0 for ts in target_steps_list):
+            #max_latents: 找出所有样本中，包含最多步骤的样本的步骤数量
+            #max_step_len: 找出所有步骤中，最长的步骤的token长度
+            max_latents = max(len(ts) for ts in target_steps_list)
+            max_step_len = max(max((len(step) for step in ts), default=0) for ts in target_steps_list)
+            
+            padded_target_steps = []
+            padded_target_masks = []
+            
+            for ts in target_steps_list:
+                b_steps = []
+                b_masks = []
+                for i in range(max_latents):
+                    if i < len(ts):# 如果当前样本有这个步骤
+                        step = ts[i]
+                        ## 填充步骤token到统一长度
+                        ## 创建对应的mask（1表示真实token，0表示填充token）
+                        b_steps.append(step + [self.tokenizer.pad_token_id] * (max_step_len - len(step)))
+                        b_masks.append([1] * len(step) + [0] * (max_step_len - len(step)))
+                    else:
+                        b_steps.append([self.tokenizer.pad_token_id] * max_step_len)
+                        b_masks.append([0] * max_step_len)
+                padded_target_steps.append(b_steps)
+                padded_target_masks.append(b_masks)
+            
+            batch["target_steps_ids"] = torch.tensor(padded_target_steps, dtype=torch.int64)
+            batch["target_steps_mask"] = torch.tensor(padded_target_masks, dtype=torch.bool)
+        # === [新增代码结束] ===
+        
+        
 
         return batch
 
@@ -246,6 +287,10 @@ def get_cot_latent_dataset(
                 scheduled_stage_to_train,
             )
 
+        # === [新增代码] 截取当前潜变量对应的真实文本步骤 ===
+        target_steps = sample["steps_tokenized"][:n_latent_tokens]
+            
+            
         # 问题+latent token+除去skip阶段的cot过程
         tokens = (
             sample["question_tokenized"]
@@ -274,7 +319,8 @@ def get_cot_latent_dataset(
             "idx": sample["idx"],
             "position_ids": list(range(len(tokens))),
             "pixel_values": torch.tensor(sample["pixel_values"]),
-            "image_grid_thw": sample["image_grid_thw"]
+            "image_grid_thw": sample["image_grid_thw"],
+            "target_steps": target_steps  # === [新增代码] ===
         }
 
     if torch.cuda.device_count() > 1:
