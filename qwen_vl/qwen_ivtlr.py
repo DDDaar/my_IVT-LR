@@ -932,7 +932,7 @@ class IVTLR(nn.Module):
             device=current_ids.device
         ).reshape(1, -1)
 
-        outputs = self.forward(
+        outputs,_,_ = self.forward(
             input_ids=current_ids,
             attention_mask=torch.ones_like(current_ids),
             labels=current_ids.clone(),  
