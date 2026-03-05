@@ -191,6 +191,7 @@ def evaluate_dataset(dataset_name, eval_dataset, model, processor, output_file):
     correct = 0
     total = 0
     total_generate_time = 0.0
+    total_token_count = 0  # 新增：用于统计总 token 数
     
     # 清空或创建文件
     with open(output_file, "w", encoding="utf-8") as f:
@@ -231,6 +232,13 @@ def evaluate_dataset(dataset_name, eval_dataset, model, processor, output_file):
             generate_end_time = time.time()
             total_generate_time += (generate_end_time - generate_start_time)
             
+            
+            # --- 修改部分：Token 统计 ---
+            generated_tokens = outputs[0, prompt_length:]
+            token_len = len(generated_tokens) # 获取当前样本生成的 token 长度
+            total_token_count += token_len     # 累加到总数
+            # --------------------------
+            
             generated_tokens = outputs[0, prompt_length:]
             output_full_text = processor.decode(outputs[0], skip_special_tokens=True)
             new_generated_text = processor.decode(generated_tokens, skip_special_tokens=True)
@@ -251,14 +259,17 @@ def evaluate_dataset(dataset_name, eval_dataset, model, processor, output_file):
             if total % 10 == 0:
                 print(f"[{dataset_name}] Processed {total}/{len(eval_dataset)}. Acc: {correct/total:.2%}")
             
+            # --- 修改部分：写入 JSONL 时包含 token_length ---
             result = {
                 "id": ex["id"],
                 "gt_answer": gt_answer,
                 "pred_answer": pred_answer,
                 "correct": is_correct,
+                "token_length": token_len,  # 保存该条回复的 token 长度
                 "generated_text": new_generated_text,
                 "full_output": output_full_text
             }
+            
             
             with open(output_file, "a", encoding="utf-8") as f_out:
                 f_out.write(json.dumps(result, ensure_ascii=False) + "\n")
