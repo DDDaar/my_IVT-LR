@@ -8,10 +8,12 @@ dataset_name: scienceqa # 选项: 'scienceqa' 或 'scienceqa'
 model_type: "2B"  # 选项: "2B" 或 "7B"
 model_path_2b: "/home/ma-user/work/lbx/models/Qwen2-VL-2B-Instruct" # 请修改为实际2B模型路径
 model_path_7b: "/home/ma-user/work/lbx/models/Qwen2-VL-7B-Instruct" # 请修改为实际7B模型路径
-suffix: '_modify_2plus_head_and_layer_gate'
+# suffix: '_modify_2plus_head_and_layer_gate'
+suffix: 'pure_cot'
 
 # -----------------
-epochs_per_stage: 4
+# 尝试一下纯cot
+epochs_per_stage: 17
 max_latent_stage: 5
 pad_latent_to_max: True
 
