@@ -19,8 +19,9 @@ find /home/ma-user/work/lbx/hf_data_cache -type f -name "*of_00032.arrow" -mmin 
 
 # 启动 DeepSpeed
 # 不使用 nohup，日志会直接打在屏幕上
+#qwen.yaml
 deepspeed --master_port 29512 \
-    qwenvl_run.py args/qwen.yaml \
+    qwenvl_run.py args/qwen_expert_online_fastcheck.yaml \
     --deepspeed \
     --deepspeed_config ds_config.json \
     2>&1 | tee qwenvl_output.txt

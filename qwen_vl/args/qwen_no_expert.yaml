@@ -10,8 +10,8 @@ dataset_name: scienceqa
 
 # Base model selection
 model_type: "2B"  # "2B" or "7B"
-model_path_2b: "/path/to/Qwen2-VL-2B-Instruct"
-model_path_7b: "/path/to/Qwen2-VL-7B-Instruct"
+model_path_2b: "/home/ma-user/work/lbx/models/Qwen2-VL-2B-Instruct" # 请修改为实际2B模型路径
+model_path_7b: "/home/ma-user/work/lbx/models/Qwen2-VL-7B-Instruct" # 请修改为实际7B模型路径
 
 # Optional suffix appended to experiment name.
 suffix: "_no_expert"

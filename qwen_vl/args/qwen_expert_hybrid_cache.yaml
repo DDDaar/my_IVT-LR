@@ -5,8 +5,8 @@ name: placeholder_name
 dataset_name: scienceqa
 
 model_type: "2B"
-model_path_2b: "/path/to/Qwen2-VL-2B-Instruct"
-model_path_7b: "/path/to/Qwen2-VL-7B-Instruct"
+model_path_2b: "/home/ma-user/work/lbx/models/Qwen2-VL-2B-Instruct" # 请修改为实际2B模型路径
+model_path_7b: "/home/ma-user/work/lbx/models/Qwen2-VL-7B-Instruct" # 请修改为实际7B模型路径
 
 suffix: "_expert_hybrid_cache"
 

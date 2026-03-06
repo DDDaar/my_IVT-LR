@@ -777,7 +777,7 @@ def main():
     
     print("Initializing DeepSpeed Training!")
     parser = argparse.ArgumentParser(description="ivtlr")
-    parser.add_argument("config_file")
+    parser.add_argument("config")
     parser.add_argument("--deepspeed", action="store_true", help="Enable DeepSpeed")
     parser.add_argument("--deepspeed_config", default="ds_config.json", help="DeepSpeed config path")
     parser.add_argument("--local_rank", type=int, default=-1, help="Local rank passed by DeepSpeed")
@@ -791,7 +791,7 @@ def main():
     torch.cuda.set_device(local_rank)
     print("line 57")
     # load the configuration file
-    with open(args.config_file) as f:
+    with open(args.config) as f:
         config_dict = yaml.safe_load(f)
 
     # config读取
