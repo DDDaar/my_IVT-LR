@@ -57,7 +57,7 @@ expert:
     online:
       models:
         sam: "vit_h"
-        dinov2: "dinov2_vitl14"
+        dinov2: "dinov2-base"
         depth: "depth_anything_v2_vitl"
 
   # Quick validation mode:

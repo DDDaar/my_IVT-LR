@@ -15,8 +15,11 @@ _PRESET_TO_HF = {
     ("sam", "vit_h"): "facebook/sam-vit-huge",
     ("sam", "vit_l"): "facebook/sam-vit-large",
     ("sam", "vit_b"): "facebook/sam-vit-base",
-    ("dinov2", "dinov2_vitl14"): "facebook/dinov2-vitl14",
-    ("dinov2", "dinov2_vitb14"): "facebook/dinov2-vitb14",
+    
+    ("dinov2", "dinov2-large"): "facebook/dinov2-large", # 对应 ViT-L
+    ("dinov2", "dinov2-base"): "facebook/dinov2-base",  # 对应 ViT-B
+    ("dinov2", "dinov2-small"): "facebook/dinov2-small", # 对应 ViT-S
+
     # DepthAnything v2 vitl: repo naming varies; override with explicit `hf:` if needed.
     ("depth", "depth_anything_v2_vitl"): "depth-anything/Depth-Anything-V2-Large",
 }
