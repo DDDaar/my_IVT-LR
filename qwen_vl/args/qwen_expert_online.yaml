@@ -1,0 +1,76 @@
+project: ivtlr
+save_path: ./qwen_vl/output
+name: placeholder_name
+
+dataset_name: scienceqa
+
+model_type: "2B"
+model_path_2b: "/path/to/Qwen2-VL-2B-Instruct"
+model_path_7b: "/path/to/Qwen2-VL-7B-Instruct"
+
+suffix: "_expert_online"
+
+epochs_per_stage: 17
+max_latent_stage: 5
+pad_latent_to_max: True
+
+load_model_path: None
+seed: 0
+resume: 0
+bf16: True
+batch_size_training: 2
+gradient_accumulation_steps: 8
+num_epochs: 16
+lr: !!float "4e-5"
+debug: False
+
+# ============================================================
+# Expert tokens + online teacher alignment
+# ============================================================
+expert:
+  enabled: True
+  experts: ["sam", "dinov2", "depth"]
+
+  # Make them normal tokens so decode(skip_special_tokens=True) keeps them visible.
+  # NOTE: Must be single-token (enforced by code). With `add_tokens`, it will be single-token.
+  token_strings:
+    sam: "<|sam_feature|>"
+    dinov2: "<|dinov2_feature|>"
+    depth: "<|depth_feature|>"
+
+  # Slot count: K hidden states per expert align to 1 gt teacher vector, averaged.
+  slots:
+    sam: 2
+    dinov2: 2
+    depth: 2
+
+  # Text prefix inserted after CoT and before "Therefore, the answer is ..."
+  prefix_text:
+    sam: "because the sam feature is "
+    dinov2: "because the dinov2 feature is "
+    depth: "because the depth feature is "
+
+  align:
+    enabled: True
+    # Total loss = CE + align.weight * align_loss
+    weight: 0.1
+    loss: "mse"  # "mse" | "cos" | "mse+cos"
+    normalize_teacher: True
+    normalize_student: True
+
+  teacher:
+    # "online" (teacher extracted during training from images)
+    # "offline" (teacher vectors loaded from cache_dir in dataset)
+    # "hybrid" (cache-first, missing computed online, optional write-back)
+    mode: "online"
+
+    online:
+      # Short preset names are supported:
+      # - sam: "vit_h" -> hf:facebook/sam-vit-huge
+      # - dinov2: "dinov2_vitl14" -> hf:facebook/dinov2-vitl14
+      # - depth: "depth_anything_v2_vitl" -> hf:depth-anything/Depth-Anything-V2-Large (override if needed)
+      models:
+        sam: "vit_h"
+        dinov2: "dinov2_vitl14"
+        depth: "depth_anything_v2_vitl"
+

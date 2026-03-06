@@ -1,0 +1,69 @@
+project: ivtlr
+save_path: ./qwen_vl/output
+name: placeholder_name
+
+dataset_name: scienceqa
+
+model_type: "2B"
+model_path_2b: "/path/to/Qwen2-VL-2B-Instruct"
+model_path_7b: "/path/to/Qwen2-VL-7B-Instruct"
+
+suffix: "_expert_hybrid_cache"
+
+epochs_per_stage: 17
+max_latent_stage: 5
+pad_latent_to_max: True
+
+load_model_path: None
+seed: 0
+resume: 0
+bf16: True
+batch_size_training: 2
+gradient_accumulation_steps: 8
+num_epochs: 16
+lr: !!float "4e-5"
+debug: False
+
+expert:
+  enabled: True
+  experts: ["sam", "dinov2", "depth"]
+
+  token_strings:
+    sam: "<|sam_feature|>"
+    dinov2: "<|dinov2_feature|>"
+    depth: "<|depth_feature|>"
+
+  slots:
+    sam: 2
+    dinov2: 2
+    depth: 2
+
+  prefix_text:
+    sam: "because the sam feature is "
+    dinov2: "because the dinov2 feature is "
+    depth: "because the depth feature is "
+
+  align:
+    enabled: True
+    weight: 0.1
+    loss: "mse"
+    normalize_teacher: True
+    normalize_student: True
+
+  teacher:
+    # Hybrid: cache-first; missing samples computed online; optional write-back to cache_dir.
+    mode: "hybrid"
+    cache_dir: "./qwen_vl/teacher_cache"
+
+    online:
+      models:
+        sam: "vit_h"
+        dinov2: "dinov2_vitl14"
+        depth: "depth_anything_v2_vitl"
+
+    hybrid:
+      # If True: training will error out if teacher cannot be obtained (cache miss + online failure).
+      require_teacher: True
+      # If True: write back missing teacher vectors to cache_dir (rank0 only).
+      write_back: True
+

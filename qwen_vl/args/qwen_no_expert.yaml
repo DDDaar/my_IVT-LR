@@ -1,0 +1,36 @@
+project: ivtlr
+# Where to save checkpoints (relative path is OK).
+save_path: ./qwen_vl/output
+
+# `qwenvl_run.py` will auto-update `name` to: {dataset_name}_qwen2vl_{model_type}_IVTLR{suffix}
+name: placeholder_name
+
+# Dataset: "scienceqa" or "m3cot"
+dataset_name: scienceqa
+
+# Base model selection
+model_type: "2B"  # "2B" or "7B"
+model_path_2b: "/path/to/Qwen2-VL-2B-Instruct"
+model_path_7b: "/path/to/Qwen2-VL-7B-Instruct"
+
+# Optional suffix appended to experiment name.
+suffix: "_no_expert"
+
+# IVT-LR schedule
+epochs_per_stage: 17
+max_latent_stage: 5
+pad_latent_to_max: True
+
+# Training
+load_model_path: None
+seed: 0
+resume: 0
+bf16: True
+batch_size_training: 2
+gradient_accumulation_steps: 8
+num_epochs: 16
+lr: !!float "4e-5"
+
+# When True, training only uses a small subset for debugging.
+debug: False
+
