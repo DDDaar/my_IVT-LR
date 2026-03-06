@@ -248,6 +248,7 @@ import os
 import time
 import argparse  # [新增] 用于命令行参数解析
 from datetime import timedelta
+import yaml
 
 # 配置日志
 logging.basicConfig(
@@ -261,7 +262,48 @@ import pdb
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
 # [修改] 增加 checkpoint_path 参数，不再硬编码
-def load_inference_model(checkpoint_path, model_base_path):
+from expert_runtime import build_expert_runtime_from_config
+import re as _re
+
+
+def _inject_teacher_dims_from_checkpoint(config_dict, state_dict):
+    if not isinstance(config_dict, dict):
+        return
+    expert_cfg = config_dict.get("expert")
+    if not isinstance(expert_cfg, dict):
+        return
+    if not bool(expert_cfg.get("enabled", False)):
+        return
+
+    teacher_dims = expert_cfg.get("teacher_dims")
+    if not isinstance(teacher_dims, dict):
+        teacher_dims = {}
+        expert_cfg["teacher_dims"] = teacher_dims
+
+    for k, v in state_dict.items():
+        m = _re.match(r"^expert_projectors\.([a-z0-9_]+)\.weight$", k)
+        if not m:
+            continue
+        expert = m.group(1)
+        if hasattr(v, "shape") and len(v.shape) == 2:
+            teacher_dims.setdefault(expert, int(v.shape[0]))
+
+
+def load_inference_model(checkpoint_path, model_base_path, config_path: str = None):
+    config_dict = None
+    state_dict = None
+    if config_path:
+        with open(config_path, "r", encoding="utf-8") as f:
+            config_dict = yaml.safe_load(f)
+
+    # Load checkpoint early so we can infer projector dims (teacher_dims) if YAML omitted them.
+    print(f"Loading checkpoint from {checkpoint_path}...")
+    state_dict = torch.load(checkpoint_path, map_location="cpu")
+    if any(k.startswith("module.") for k in state_dict.keys()):
+        state_dict = {k.replace("module.", ""): v for k, v in state_dict.items()}
+    if config_dict is not None:
+        _inject_teacher_dims_from_checkpoint(config_dict, state_dict)
+
     processor = AutoProcessor.from_pretrained(model_base_path)
     tokenizer = AutoTokenizer.from_pretrained(
         model_base_path,
@@ -277,6 +319,17 @@ def load_inference_model(checkpoint_path, model_base_path):
             "<|latent|>"
         ]
     })
+
+    # Expert runtime is optional; when enabled, expert tokens are added as normal tokens
+    # so that decode(skip_special_tokens=True) will keep them visible.
+    expert_runtime = None
+    if config_dict is not None:
+        expert_runtime = build_expert_runtime_from_config(
+            config_dict,
+            tokenizer,
+            add_tokens=True,
+            for_inference=True,
+        )
     
     base_model = Qwen2VLForConditionalGeneration.from_pretrained(
         model_base_path,
@@ -315,16 +368,16 @@ def load_inference_model(checkpoint_path, model_base_path):
         image_token_id=image_token_id,
         visual_start_id=visual_start_id, 
         visual_end_id=visual_end_id,
-        model_path=model_base_path
+        model_path=model_base_path,
+        expert_runtime=expert_runtime,
     )
     
-    print(f"Loading checkpoint from {checkpoint_path}...")
-    state_dict = torch.load(checkpoint_path, map_location="cpu")
-    # 处理 module. 前缀
-    if any(k.startswith("module.") for k in state_dict.keys()):
-        state_dict = {k.replace("module.", ""): v for k, v in state_dict.items()}
-    
-    model.load_state_dict(state_dict, strict=True)
+    try:
+        model.load_state_dict(state_dict, strict=True)
+    except Exception as e:
+        print("[Load Error] Failed to load checkpoint strictly.")
+        print("If this checkpoint was trained with expert tokens/modules, pass `--config` with the same YAML used in training.")
+        raise
     # print(model) # 保持输出简洁，注释掉
     print("Successfully load model")
     
@@ -662,12 +715,13 @@ if __name__ == "__main__":
     parser.add_argument("--dataset", type=str, default="m3cot", choices=["m3cot", "scienceqa"], help="Dataset to evaluate (m3cot or scienceqa)")
     parser.add_argument("--model_base_path", type=str, default="/home/ma-user/work/lbx/models/Qwen2-VL-2B-Instruct", help="Path to the base Qwen2-VL model (2B or 7B)")
     parser.add_argument("--output_path", type=str, default="output/qwen2-vl-2b-m3cot.jsonl", help="Path to the base Qwen2-VL model (2B or 7B)")
+    parser.add_argument("--config", type=str, default=None, help="Optional YAML config (enables expert tokens/modules if present)")
     
     args = parser.parse_args()
     output_path = args.output_path
     
     # 1. 加载模型
-    model, processor, tokenizer = load_inference_model(args.checkpoint, args.model_base_path)
+    model, processor, tokenizer = load_inference_model(args.checkpoint, args.model_base_path, config_path=args.config)
 
     
     # 2. 根据参数选择评测数据集
@@ -677,8 +731,6 @@ if __name__ == "__main__":
         evaluate_scienceqa(model, processor,output_path)
     else:
         print("Invalid dataset selected.")
-
-
 
 
 

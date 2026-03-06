@@ -572,6 +572,10 @@ from dataset import (
     get_cot_latent_dataset,
     MyCollator,
 )
+from expert_runtime import build_expert_runtime_from_config
+import re
+from dataclasses import replace
+from teacher_online import infer_teacher_dim_from_source
 
 # LoRA
 lora_config = LoraConfig(
@@ -860,6 +864,56 @@ def main():
     tokenizer.add_tokens("<|start-latent|>")
     tokenizer.add_tokens("<|end-latent|>")
     tokenizer.add_tokens("<|latent|>")
+
+    # Expert runtime (adds expert tokens as normal tokens so decode() keeps them)
+    expert_runtime = build_expert_runtime_from_config(
+        config_dict,
+        tokenizer,
+        add_tokens=True,
+        for_inference=False,
+    )
+    if rank == 0 and expert_runtime is not None:
+        print(f"[Expert] enabled={expert_runtime.enabled}, experts={expert_runtime.experts}, slots={expert_runtime.slots}")
+
+    # Infer teacher dims automatically if not provided in YAML.
+    if expert_runtime is not None and expert_runtime.align_enabled and expert_runtime.align_weight > 0:
+        dims = dict(expert_runtime.teacher_dims)
+        for e in expert_runtime.experts:
+            if int(dims.get(e, 0)) > 0:
+                continue
+
+            if expert_runtime.teacher_mode in ("online", "hybrid"):
+                src = expert_runtime.teacher_sources.get(e)
+                if not src:
+                    raise ValueError(f"Missing expert.teacher.online.models.{e} (required to infer dims in {expert_runtime.teacher_mode} mode)")
+                dims[e] = int(infer_teacher_dim_from_source(e, src))
+            elif expert_runtime.teacher_mode == "offline":
+                # Infer from any cache entry (if present); otherwise require explicit dims.
+                cache_dir = expert_runtime.teacher_cache_dir
+                if not cache_dir:
+                    raise ValueError("Missing expert.teacher.offline.cache_dir (required for offline mode)")
+                exp_dir = os.path.join(cache_dir, e)
+                dim_found = 0
+                if os.path.isdir(exp_dir):
+                    for fn in os.listdir(exp_dir):
+                        if fn.endswith(".pt"):
+                            vec = torch.load(os.path.join(exp_dir, fn), map_location="cpu")
+                            if torch.is_tensor(vec):
+                                dim_found = int(vec.view(-1).numel())
+                                break
+                if dim_found <= 0:
+                    raise ValueError(
+                        f"Cannot infer teacher dim for offline expert={e} from cache_dir={cache_dir}. "
+                        f"Please add at least one cached vector or set expert.teacher_dims.{e}."
+                    )
+                dims[e] = dim_found
+            else:
+                raise ValueError(f"Unknown expert.teacher.mode: {expert_runtime.teacher_mode}")
+
+        expert_runtime = replace(expert_runtime, teacher_dims=dims)
+        if rank == 0:
+            print(f"[Expert] inferred teacher_dims={expert_runtime.teacher_dims}")
+
     # processor = AutoProcessor.from_pretrained("Qwen/Qwen2-VL-7B-Instruct", tokenizer=tokenizer)
     processor = AutoProcessor.from_pretrained(model_path, tokenizer=tokenizer)
     latent_id = tokenizer.convert_tokens_to_ids("<|latent|>")
@@ -881,7 +935,10 @@ def main():
     # initialize the new token embeddings with a known token
     # it helps stablize the training
     # 这里似乎没有使用已有的embedding初始化？
-    for token_id in [latent_id, start_id, end_id]:
+    init_token_ids = [latent_id, start_id, end_id]
+    if expert_runtime is not None:
+        init_token_ids.extend(expert_runtime.token_id_list())
+    for token_id in init_token_ids:
         target_embedding = embeddings.weight.data[token_id]
         embeddings.weight.data[token_id] = target_embedding
         # The input embeddings and lm heads are tied in GPT2. So the code below is not necessary
@@ -890,7 +947,18 @@ def main():
     
     model.print_trainable_parameters()
 
-    model = IVTLR(model, latent_id, start_id, end_id, tokenizer.eos_token_id, image_token_id, visual_start_id, visual_end_id,model_path=model_path)
+    model = IVTLR(
+        model,
+        latent_id,
+        start_id,
+        end_id,
+        tokenizer.eos_token_id,
+        image_token_id,
+        visual_start_id,
+        visual_end_id,
+        model_path=model_path,
+        expert_runtime=expert_runtime,
+    )
 
     # deepspeed包装模型
     print(f"Running Deepspeed on rank = {rank}, world size = {world_size}")
@@ -954,9 +1022,98 @@ def main():
 
         
 
+    keep_image = False
+    if expert_runtime is not None and getattr(expert_runtime, "enabled", False):
+        if expert_runtime.teacher_mode in ("online", "hybrid") and "sam" in expert_runtime.experts:
+            keep_image = True
+
     base_dataset_train = get_dataset(
-        train_dataset, tokenizer, processor, max_size=5000 if configs.debug else 100000000
+        train_dataset,
+        tokenizer,
+        processor,
+        max_size=5000 if configs.debug else 100000000,
+        keep_image=keep_image,
     )
+
+    # Optional: quick overfit/format validation mode driven by YAML.
+    fast_cfg = None
+    if isinstance(config_dict.get("expert"), dict):
+        fast_cfg = config_dict["expert"].get("format_overfit_test")
+        if not isinstance(fast_cfg, dict):
+            fast_cfg = None
+        elif not bool(fast_cfg.get("enabled", False)):
+            fast_cfg = None
+
+    num_epochs_to_run = configs.num_epochs
+    stage_override = None
+    if fast_cfg is not None:
+        ds_size = int(fast_cfg.get("dataset_size", 16))
+        if ds_size > 0:
+            base_dataset_train = base_dataset_train.select(range(min(ds_size, len(base_dataset_train))))
+            if rank == 0:
+                print(f"[FastCheck] Using dataset_size={len(base_dataset_train)}")
+        num_epochs_to_run = int(fast_cfg.get("num_epochs", num_epochs_to_run))
+        stage_override = str(fast_cfg.get("stage", "")).strip().lower() or None
+        if rank == 0:
+            print(f"[FastCheck] num_epochs={num_epochs_to_run}, stage_override={stage_override}")
+
+    def _run_format_check(model_for_gen, check_samples: int = 8):
+        if expert_runtime is None or not getattr(expert_runtime, "enabled", False):
+            print("[FastCheck] expert_runtime is disabled; skip format check.")
+            return
+
+        model_for_gen.eval()
+        n = min(int(check_samples), len(base_dataset_train))
+        print(f"[FastCheck] Running format check on {n} samples from training data.")
+
+        for i in range(n):
+            ex = base_dataset_train[i]
+            device_id = torch.cuda.current_device() if torch.cuda.is_available() else "cpu"
+
+            # Build inference prompt from training sample: question + latent tokens (no steps/answer).
+            if stage_override == "skip_all_steps":
+                if configs.pad_latent_to_max:
+                    n_latent = int(configs.max_latent_stage)
+                else:
+                    n_latent = min(len(ex["steps_tokenized"]), int(configs.max_latent_stage))
+            else:
+                # Fallback: mirror stage=0 prompt by default.
+                n_latent = 0
+
+            prompt_ids = ex["question_tokenized"] + [latent_id] * int(n_latent)
+            input_ids = torch.tensor(prompt_ids, dtype=torch.long, device=device_id).unsqueeze(0)
+            attention_mask = torch.ones_like(input_ids)
+
+            pv = torch.as_tensor(ex["pixel_values"]).to(device_id)
+            if pv.ndim == 3:
+                pv = pv.unsqueeze(0)
+            grid = torch.as_tensor(ex["image_grid_thw"]).to(device_id)
+            if grid.ndim == 1:
+                grid = grid.unsqueeze(0)
+
+            with torch.no_grad():
+                out_ids = model_for_gen.generate(
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                    pixel_values=pv,
+                    image_grid_thw=grid,
+                    max_new_tokens=256,
+                )
+
+            gen = tokenizer.decode(out_ids[0], skip_special_tokens=True)
+            ans_pos = gen.lower().find("therefore")
+            ok = True
+            for e in expert_runtime.experts:
+                tok = expert_runtime.token_strs[e]
+                pos = gen.find(tok)
+                if pos < 0:
+                    ok = False
+                if ans_pos >= 0 and pos >= 0 and pos > ans_pos:
+                    ok = False
+            print(f"[FastCheck] sample={i} ok={ok}")
+            if not ok:
+                print(gen[-600:])
+
 
     total_train_steps = 0
 
@@ -973,12 +1130,51 @@ def main():
 
     collator = MyCollator(tokenizer, latent_id=latent_id, label_pad_token_id=-100)
 
+    # Preview stage formats before training starts.
+    if rank == 0 and expert_runtime is not None:
+        try:
+            stages = sorted({e // configs.epochs_per_stage for e in range(configs.num_epochs)})
+            preview_stages = stages + [configs.max_latent_stage + 1]
+            preview_stages = sorted(set(preview_stages))
+            print(f"[Stage Preview] stages={preview_stages}")
+            for st in preview_stages:
+                ds_preview = get_cot_latent_dataset(
+                    st,
+                    base_dataset_train.select(range(1)),
+                    configs,
+                    start_id,
+                    latent_id,
+                    end_id,
+                    expert_runtime=expert_runtime,
+                    no_special_marker=True,
+                    shuffle=False,
+                )
+                ex = ds_preview[0]
+                ids = ex["input_ids"]
+                lbl = ex["labels"]
+                decoded = tokenizer.decode(ids, skip_special_tokens=False)
+                print("=" * 40)
+                print(f"[Stage {st}] input_len={len(ids)} labels_len={len(lbl)}")
+                # CE positions: where label != -100
+                ce_start = next((i for i, v in enumerate(lbl) if v != -100), None)
+                print(f"[Stage {st}] ce_start={ce_start}")
+                for e in expert_runtime.experts:
+                    tid = expert_runtime.token_ids[e]
+                    pos = [i for i, x in enumerate(ids) if x == tid]
+                    print(f"[Stage {st}] expert={e} token_pos={pos}")
+                print(decoded[-400:])
+        except Exception as e:
+            print(f"[Stage Preview] failed: {e}")
+
     # 训练循环
     # pdb.set_trace()
-    for epoch in range(configs.resume, configs.num_epochs):
+    for epoch in range(configs.resume, num_epochs_to_run):
 
         # 正在处于训练的哪一个阶段
-        scheduled_stage = epoch // configs.epochs_per_stage
+        if stage_override == "skip_all_steps":
+            scheduled_stage = int(configs.max_latent_stage) + 1
+        else:
+            scheduled_stage = epoch // configs.epochs_per_stage
 
         np.random.seed(epoch) 
         # import torch
@@ -990,6 +1186,7 @@ def main():
             start_id,
             latent_id,
             end_id,
+            expert_runtime=expert_runtime,
             no_special_marker=True,
             shuffle=True,
         )
@@ -1042,9 +1239,7 @@ def main():
 
                 
             total_train_steps += 1
-            batch = {
-                key: batch[key].to(rank) for key in batch.keys() if key != "idx"
-            }
+            batch = {key: (batch[key].to(rank) if torch.is_tensor(batch[key]) else batch[key]) for key in batch.keys()}
 
             outputs = model_engine(**batch)
             loss = outputs.loss
@@ -1116,6 +1311,12 @@ def main():
             gc.collect()
             torch.cuda.empty_cache()
 
+    # Post-training quick format check using training data as inference content.
+    if fast_cfg is not None and rank == 0:
+        try:
+            _run_format_check(model_engine.module, check_samples=int(fast_cfg.get("check_samples", 8)))
+        except Exception as e:
+            print(f"[FastCheck] format check failed: {e}")
+
 if __name__ == "__main__":
     main()
-

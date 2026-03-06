@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.nn import CrossEntropyLoss
 from collections import namedtuple
 from transformers.models.gpt2 import GPT2LMHeadModel
@@ -13,6 +14,14 @@ logging.basicConfig(
 )
 import pdb
 from transformers.cache_utils import DynamicCache
+
+try:
+    import torch.distributed as dist
+except Exception:  # pragma: no cover
+    dist = None
+
+from teacher_cache import load_teacher_vector, save_teacher_vector
+from teacher_online import OnlineTeacherManager
 
 Outputs = namedtuple("Outputs", ["loss", "inputs_embeds", "logits"])
 MAX_N_LATENT = 4
@@ -34,6 +43,7 @@ class IVTLR(nn.Module):
         visual_end_id,
         num_selected_patches: int = 32,
         model_path: str = None,  # [新增参数]
+        expert_runtime=None,
     ):
 
         super(IVTLR, self).__init__()
@@ -47,6 +57,7 @@ class IVTLR(nn.Module):
         self.visual_start_id = visual_start_id
         self.visual_end_id = visual_end_id
         self.num_selected_patches = num_selected_patches
+        self.expert_runtime = expert_runtime
 
         # tested with GPT2 and Llama3
         if isinstance(self.base_causallm, GPT2LMHeadModel):
@@ -144,6 +155,32 @@ class IVTLR(nn.Module):
               nn.Softmax(dim=-1)
         )
         ####################################################################
+
+        # Expert projectors (student hidden -> expert native dim).
+        self.expert_projectors = nn.ModuleDict()
+        self._teacher_online = None
+        if self.expert_runtime is not None and getattr(self.expert_runtime, "enabled", False):
+            for e in self.expert_runtime.experts:
+                d = int(self.expert_runtime.teacher_dims.get(e, 0))
+                if d <= 0:
+                    raise ValueError(
+                        f"Missing expert.teacher_dims.{e}. "
+                        f"Training should infer it from teacher model/caches; "
+                        f"inference should infer it from checkpoint. Please check your YAML / loading path."
+                    )
+                self.expert_projectors[e] = nn.Linear(hidden_size, d, bias=False)
+
+            if (
+                self.expert_runtime.align_enabled
+                and self.expert_runtime.align_weight > 0
+                and self.expert_runtime.teacher_mode in ("online", "hybrid")
+            ):
+                # Lazy-load models on first use to keep init fast.
+                self._teacher_online = OnlineTeacherManager(
+                    self.expert_runtime.teacher_sources,
+                    device="cuda" if torch.cuda.is_available() else "cpu",
+                    dtype="bf16",
+                )
     
     
     
@@ -206,6 +243,7 @@ class IVTLR(nn.Module):
         position_ids: torch.LongTensor,      # shape = (B, S)
         pixel_values: torch.FloatTensor,     # shape = (B, 3, H, W)
         image_grid_thw: torch.Tensor = None,
+        idx: torch.LongTensor = None,
         **kwargs
     ):
 
@@ -874,6 +912,138 @@ class IVTLR(nn.Module):
         loss_fct = CrossEntropyLoss(ignore_index=-100)
         loss = loss_fct(shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1))
 
+        # Expert align loss: align K slots to a single gt vector per expert per image.
+        # Only compute during training; generation/eval should not require teacher inputs.
+        if (
+            self.training
+            and self.expert_runtime is not None
+            and getattr(self.expert_runtime, "enabled", False)
+        ):
+            if self.expert_runtime.align_enabled and self.expert_runtime.align_weight > 0:
+                try:
+                    final_hidden = outputs.hidden_states[-1]  # (B, final_S, D)
+                    insert_offset = int(self.num_selected_patches) * int(max_n_latents)
+                    align_losses = []
+
+                    for e in self.expert_runtime.experts:
+                        token_id = int(self.expert_runtime.token_ids[e])
+                        # teacher vector: prefer offline-provided batch tensors
+                        t = kwargs.get(f"teacher_{e}", None)
+                        if t is None and self.expert_runtime.teacher_mode in ("offline",):
+                            if self.expert_runtime.teacher_require:
+                                raise ValueError(f"Missing teacher_{e} in batch for offline mode")
+                            continue
+
+                        if t is None and self.expert_runtime.teacher_mode in ("online", "hybrid"):
+                            if self._teacher_online is None:
+                                if self.expert_runtime.teacher_require:
+                                    raise ValueError(f"Online teacher not available for expert={e}")
+                                continue
+
+                            # Hybrid: try cache first if configured.
+                            cache_dir = self.expert_runtime.teacher_cache_dir
+                            t_list = []
+                            missing = []
+                            if cache_dir and idx is not None:
+                                idx_cpu = idx.detach().to("cpu").tolist()
+                                for j, sample_idx in enumerate(idx_cpu):
+                                    cached = load_teacher_vector(cache_dir, e, int(sample_idx))
+                                    if cached is None:
+                                        missing.append(j)
+                                        t_list.append(None)
+                                    else:
+                                        t_list.append(cached)
+                            else:
+                                missing = list(range(B))
+                                t_list = [None] * B
+
+                            if len(missing) > 0:
+                                if e == "sam":
+                                    images = kwargs.get("images", None)
+                                    if images is None:
+                                        if self.expert_runtime.teacher_require:
+                                            raise ValueError("Missing `images` in batch for online SAM teacher.")
+                                        continue
+                                    vec_all = self._teacher_online.get_vector(e, images=images)  # (B, d)
+                                else:
+                                    pv = pixel_values
+                                    if pv.ndim == 5 and pv.size(1) == 1:
+                                        pv = pv[:, 0]
+                                    vec_all = self._teacher_online.get_vector(e, pixel_values=pv)  # (B, d)
+                                vec_all_cpu = vec_all.detach().to("cpu")
+                                for j in missing:
+                                    t_list[j] = vec_all_cpu[j]
+
+                                if (
+                                    self.expert_runtime.teacher_mode == "hybrid"
+                                    and self.expert_runtime.teacher_write_back
+                                    and cache_dir
+                                    and idx is not None
+                                    and dist is not None
+                                    and (not dist.is_initialized() or dist.get_rank() == 0)
+                                ):
+                                    idx_cpu = idx.detach().to("cpu").tolist()
+                                    for j in missing:
+                                        save_teacher_vector(cache_dir, e, int(idx_cpu[j]), t_list[j])
+
+                            t = torch.stack([x.view(-1) for x in t_list], dim=0)
+
+                        if t is None:
+                            continue
+
+                        t = t.to(final_hidden.device).to(final_hidden.dtype)
+                        if self.expert_runtime.normalize_teacher:
+                            t = F.normalize(t, dim=-1)
+
+                        # Locate expert token positions in original input_ids.
+                        pos = (input_ids == token_id).nonzero(as_tuple=False)  # (N, 2): (b, pos)
+                        if pos.numel() == 0:
+                            continue
+
+                        # Collect K slots per sample, aligned to the same teacher vector.
+                        per_sample_positions = [[] for _ in range(B)]
+                        for b_i, p_i in pos.tolist():
+                            per_sample_positions[b_i].append(int(p_i))
+
+                        k_slots = int(self.expert_runtime.slots[e])
+                        hs_list = []
+                        t_list2 = []
+                        for b in range(B):
+                            ps = per_sample_positions[b][:k_slots]
+                            if len(ps) == 0:
+                                continue
+                            ps_final = [p + insert_offset for p in ps]
+                            ps_final = [p for p in ps_final if 0 <= p < final_hidden.size(1)]
+                            if len(ps_final) == 0:
+                                continue
+                            hs_list.append(final_hidden[b, ps_final, :])  # (K, D)
+                            t_list2.append(t[b].unsqueeze(0).expand(len(ps_final), -1))  # (K, d)
+
+                        if len(hs_list) == 0:
+                            continue
+
+                        hs_all = torch.cat(hs_list, dim=0)  # (sumK, D)
+                        tt_all = torch.cat(t_list2, dim=0)  # (sumK, d)
+                        proj = self.expert_projectors[e](hs_all)  # (sumK, d)
+                        if self.expert_runtime.normalize_student:
+                            proj = F.normalize(proj, dim=-1)
+
+                        if self.expert_runtime.align_loss == "cos":
+                            l = 1.0 - F.cosine_similarity(proj, tt_all, dim=-1)
+                            align_losses.append(l.mean())
+                        elif self.expert_runtime.align_loss in ("mse+cos", "cos+mse"):
+                            l1 = (proj - tt_all).pow(2).mean()
+                            l2 = (1.0 - F.cosine_similarity(proj, tt_all, dim=-1)).mean()
+                            align_losses.append(l1 + l2)
+                        else:
+                            align_losses.append((proj - tt_all).pow(2).mean())
+
+                    if len(align_losses) > 0:
+                        loss = loss + float(self.expert_runtime.align_weight) * torch.stack(align_losses).mean()
+                except Exception as e:
+                    # Keep training robust; if align fails, surface the error clearly.
+                    print(f"[Expert Align] failed: {e}")
+
         # --- 【最终检查】 ---
         if torch.isnan(loss):
             print("🚨 训练崩溃: 计算出的 Loss 为 NaN！优化器将跳过更新。")
@@ -1021,5 +1191,3 @@ class IVTLR(nn.Module):
             return torch.tensor(tokens).view(1, -1), current_inputs_embeds
         else:
             return torch.tensor(tokens).view(1, -1)
-
-

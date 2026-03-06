@@ -15,6 +15,7 @@ import pdb
 import logging
 from itertools import count
 
+from teacher_cache import load_teacher_vector
 
 logging.basicConfig(
     filename='qwenvl_sqa_4.log',  
@@ -25,7 +26,7 @@ logging.basicConfig(
 
 #主函数，处理原始数据集，将文本tokenize，并处理图像数据。
 
-def get_dataset(dataset, tokenizer, processor, max_size=1000000000):
+def get_dataset(dataset, tokenizer, processor, max_size=1000000000, keep_image: bool = False):
     # 单个样本处理
     def tokenize_sample(sample, max_length=3400):
         image = sample["image"]
@@ -81,6 +82,9 @@ def get_dataset(dataset, tokenizer, processor, max_size=1000000000):
             "image_grid_thw": image_grid_thw,
             "idx": sample["idx"],
         }
+        if keep_image:
+            # Keep raw image for online SAM teacher extraction.
+            sample["image"] = image
         
         return sample
 
@@ -157,22 +161,48 @@ class MyCollator:
 
         label_name = "label" if "label" in features[0].keys() else "labels"
 
-        non_label_position_features = [
-            {
-                k: v
-                for k, v in feature.items()
-                if k != label_name and k != "position_ids"
-            }
-            for feature in features
-        ]
+        # Tokenizer.pad can behave unexpectedly for extra tensor fields (e.g., pixel_values).
+        # We only use it for input_ids/attention_mask, and stack the rest ourselves.
+        to_pad = []
+        extra_pixel_values = []
+        extra_image_grid_thw = []
+        extra_idx = []
+        extra_images = []
+        extra_teachers = {}
+
+        for feature in features:
+            to_pad.append(
+                {
+                    "input_ids": feature["input_ids"],
+                    "attention_mask": feature["attention_mask"],
+                }
+            )
+            extra_pixel_values.append(feature["pixel_values"])
+            extra_image_grid_thw.append(feature["image_grid_thw"])
+            extra_idx.append(feature.get("idx", -1))
+            # For online SAM teacher: keep raw images as a python list.
+            if "image" in feature:
+                extra_images.append(feature["image"])
+
+            for k, v in feature.items():
+                if k.startswith("teacher_"):
+                    extra_teachers.setdefault(k, []).append(v)
 
         batch = pad_without_fast_tokenizer_warning(
             self.tokenizer,
-            non_label_position_features,
+            to_pad,
             padding=True,
             pad_to_multiple_of=None,
             return_tensors=return_tensors,
         )
+
+        batch["pixel_values"] = torch.stack([torch.as_tensor(x) for x in extra_pixel_values], dim=0)
+        batch["image_grid_thw"] = torch.stack([torch.as_tensor(x) for x in extra_image_grid_thw], dim=0)
+        batch["idx"] = torch.tensor(extra_idx, dtype=torch.long)
+        if len(extra_images) > 0:
+            batch["images"] = extra_images
+        for k, vs in extra_teachers.items():
+            batch[k] = torch.stack([torch.as_tensor(x).view(-1) for x in vs], dim=0)
 
         labels = (
             [feature[label_name] for feature in features]
@@ -217,6 +247,7 @@ def get_cot_latent_dataset(
     start_id,
     latent_id,
     end_id,
+    expert_runtime=None,
     no_special_marker=False,
     shuffle=False,
 ):
@@ -246,6 +277,13 @@ def get_cot_latent_dataset(
                 scheduled_stage_to_train,
             )
 
+        expert_segment = []
+        if expert_runtime is not None and getattr(expert_runtime, "enabled", False):
+            for e in expert_runtime.experts:
+                expert_segment.extend(expert_runtime.prefix_ids[e])
+                expert_segment.extend([expert_runtime.token_ids[e]] * int(expert_runtime.slots[e]))
+                expert_segment.extend(expert_runtime.newline_ids)
+
         # 问题+latent token+除去skip阶段的cot过程
         tokens = (
             sample["question_tokenized"]
@@ -253,13 +291,11 @@ def get_cot_latent_dataset(
             + list(
                 itertools.chain.from_iterable(sample["steps_tokenized"][n_skip_steps:])
             )
+            + expert_segment
             + sample["answer_tokenized"]
         )
 
-        # labels: 问题和潜变量部分设为-100（不计算损失），其余部分（剩余steps和answer）计算损失
-        # attention_mask: 全部为1（都参与注意力计算）
-        # 保留图像信息
-        return {
+        out = {
             "input_ids": tokens,
             "labels": [-100]
             * (
@@ -276,6 +312,31 @@ def get_cot_latent_dataset(
             "pixel_values": torch.tensor(sample["pixel_values"]),
             "image_grid_thw": sample["image_grid_thw"]
         }
+        if "image" in sample:
+            out["image"] = sample["image"]
+
+        # Offline teacher vectors: one gt feature vector per expert per image.
+        if (
+            expert_runtime is not None
+            and getattr(expert_runtime, "enabled", False)
+            and expert_runtime.align_enabled
+            and expert_runtime.align_weight > 0
+            and expert_runtime.teacher_mode == "offline"
+        ):
+            if not expert_runtime.teacher_cache_dir:
+                raise ValueError("expert.teacher.offline.cache_dir is required for offline mode")
+            for e in expert_runtime.experts:
+                vec = load_teacher_vector(expert_runtime.teacher_cache_dir, e, sample["idx"])
+                if vec is None:
+                    raise FileNotFoundError(
+                        f"Missing teacher cache for expert={e}, idx={sample['idx']} under {expert_runtime.teacher_cache_dir}"
+                    )
+                out[f"teacher_{e}"] = vec
+
+        # labels: 问题和潜变量部分设为-100（不计算损失），其余部分（剩余steps和answer）计算损失
+        # attention_mask: 全部为1（都参与注意力计算）
+        # 保留图像信息
+        return out
 
     if torch.cuda.device_count() > 1:
         # 在0号卡处理后广播到其他device
