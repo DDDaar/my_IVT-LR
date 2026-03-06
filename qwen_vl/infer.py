@@ -647,6 +647,9 @@ def evaluate_m3cot(model, processor, output_path="output/qwen2vl_32.jsonl"):
         logging.info(f"[FINAL] Avg generated tokens per sample: {avg_generated_tokens:.1f}")
         logging.info(f"[FINAL] Total generate time: {total_generate_time:.2f}s ({timedelta(seconds=int(total_generate_time))})")
         logging.info(f"[FINAL] Avg generate time per sample: {avg_time_per_sample:.3f}s")
+        # 建议在 evaluate_m3cot 函数末尾添加：
+        print(f"Avg Tokens: {avg_generated_tokens:.1f}")
+        print(f"Avg Time per Sample: {avg_time_per_sample:.3f}s")
         print(f"M3CoT Final Accuracy: {correct/total:.2%}")
 
 # ==========================================

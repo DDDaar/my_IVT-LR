@@ -10,6 +10,11 @@ import os
 import time
 import argparse
 
+# python infer_qwen2vl_pure_cot_infer.py \
+#     --ckpt_path "/home/ma-user/work/lbx/IVT-LR/qwen_vl/output/scienceqa_qwen2vl_2B_IVTLRpure_cot/epoch_16_full_model_fp32.pth" \
+#     --dataset scienceqa \
+#     --output_dir "output_cot/scienceqa/"
+
 # 设置日志
 logging.basicConfig(
     filename='infer_pure_cot_qwen2vl.log',
@@ -20,13 +25,46 @@ logging.basicConfig(
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
-def load_inference_model(model_path):
+# def load_inference_model(model_path):
+#     """
+#     加载原版 Qwen2-VL 模型
+#     """
+#     print(f"Loading original Qwen2-VL model from {model_path}...")
+    
+#     # 加载 Processor 和 Tokenizer
+#     processor = AutoProcessor.from_pretrained(model_path)
+#     tokenizer = AutoTokenizer.from_pretrained(
+#         model_path,
+#         use_fast=False,
+#         trust_remote_code=True,
+#         padding_side="right"
+#     )
+    
+#     # 直接加载 Qwen2VL 模型
+#     model = Qwen2VLForConditionalGeneration.from_pretrained(
+#         model_path,
+#         device_map="cuda",
+#         torch_dtype=torch.bfloat16,
+#         trust_remote_code=True,
+#         attn_implementation="eager"
+#     )
+    
+#     # 确保 tokenizer 设置正确
+#     processor.tokenizer = tokenizer
+#     model.eval()
+    
+#     print("Model loaded successfully.")
+#     return model, processor, tokenizer
+
+
+
+def load_inference_model(model_path, ckpt_path=None):
     """
-    加载原版 Qwen2-VL 模型
+    加载原版 Qwen2-VL 模型，并可选加载 .pth 权重
     """
     print(f"Loading original Qwen2-VL model from {model_path}...")
     
-    # 加载 Processor 和 Tokenizer
+    # 1. 加载 Processor 和 Tokenizer
     processor = AutoProcessor.from_pretrained(model_path)
     tokenizer = AutoTokenizer.from_pretrained(
         model_path,
@@ -35,7 +73,7 @@ def load_inference_model(model_path):
         padding_side="right"
     )
     
-    # 直接加载 Qwen2VL 模型
+    # 2. 加载基础架构
     model = Qwen2VLForConditionalGeneration.from_pretrained(
         model_path,
         device_map="cuda",
@@ -44,7 +82,32 @@ def load_inference_model(model_path):
         attn_implementation="eager"
     )
     
-    # 确保 tokenizer 设置正确
+    # 3. 加载 .pth 权重 (如果提供)
+    if ckpt_path and os.path.exists(ckpt_path):
+        print(f"Loading weights from checkpoint: {ckpt_path}...")
+        # map_location='cpu' 可以避免 OOM，加载后再转移到 GPU
+        state_dict = torch.load(ckpt_path, map_location='cpu')
+        
+        # 自动处理某些框架保存时可能存在的 'model' 或 'state_dict' 嵌套
+        if 'model' in state_dict:
+            state_dict = state_dict['model']
+        elif 'state_dict' in state_dict:
+            state_dict = state_dict['state_dict']
+
+        # 核心：处理 Key 的前缀问题
+        # 很多训练脚本会给 key 加上 "model." 前缀，如果直接 load 会匹配失败
+        new_state_dict = {}
+        for k, v in state_dict.items():
+            name = k.replace("module.", "") # 去掉 DistributedDataParallel 产生的 module.
+            # 如果你的 ckpt 里的 key 带有 "model." 前缀，而加载的 model 结构没有，则需要去掉
+            # name = name.replace("model.", "") 
+            new_state_dict[name] = v
+
+        # 加载权重
+        # strict=False 允许加载部分权重（例如只加载 LoRA 权重或忽略某些不匹配的层）
+        msg = model.load_state_dict(new_state_dict, strict=False)
+        print(f"Checkpoint loaded status: {msg}")
+    
     processor.tokenizer = tokenizer
     model.eval()
     
@@ -291,19 +354,22 @@ def evaluate_dataset(dataset_name, eval_dataset, model, processor, output_file):
 
 def main():
     parser = argparse.ArgumentParser(description="Evaluate original Qwen2-VL on M3CoT and ScienceQA")
-    parser.add_argument("--model_path", type=str, default="/home/ma-user/work/lbx/models/Qwen2-VL-7B-Instruct", help="Path to the model")
+    parser.add_argument("--model_path", type=str, default="/home/ma-user/work/lbx/models/Qwen2-VL-2B-Instruct", help="Path to the model")
     parser.add_argument("--dataset", type=str, default="all", choices=["m3cot", "scienceqa", "all"], help="Dataset to evaluate")
     parser.add_argument("--output_dir", type=str, default="output_ori", help="Output directory")
+    # 添加 ckpt_path 参数
+    parser.add_argument("--ckpt_path", type=str, default=None, help="Path to the .pth checkpoint")
+    
     args = parser.parse_args()
 
-    os.makedirs(args.output_dir, exist_ok=True)
-
-    if '2B' in args.model_path:
-        args.output_dir = "output_ori_2B"    
-    elif '7B' in args.model_path:
-        args.output_dir = "output_ori_7B"
+    # 检查并创建输出目录
+    if not os.path.exists(args.output_dir):
+        os.makedirs(args.output_dir)
+        print(f"创建输出目录: {args.output_dir}")
     else:
-        pass
+        print(f"输出目录已存在: {args.output_dir}")
+
+    
     
     # 1. 加载模型
     model, processor, tokenizer = load_inference_model(args.model_path)
