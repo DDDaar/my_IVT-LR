@@ -1050,7 +1050,8 @@ class IVTLR(nn.Module):
                 except Exception as e:
                     # Keep training robust; if align fails, surface the error clearly.
                     print(f"[Expert Align] failed: {e}")
-
+                    # ============= 【新增】必须抛出异常 =============
+                    raise e
         # --- 【最终检查】 ---
         if torch.isnan(loss):
             print("🚨 训练崩溃: 计算出的 Loss 为 NaN！优化器将跳过更新。")

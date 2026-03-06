@@ -146,12 +146,12 @@ class OnlineTeacherManager:
             # ====== [修改] 强制将输入对齐到 model_dtype ======
             pv = inputs["pixel_values"].to(self.device).to(model_dtype)
 
-            out = model(pixel_values=pv)
-
-            # SamModel outputs image_embeddings: (B, 256, 64, 64) typically.
-            img_emb = getattr(out, "image_embeddings", None)
+            # ====== [修改核心] 使用专用的提取方法，直接获取特征并跳过解码器 ======
+            img_emb = model.get_image_embeddings(pv)
+            
             if img_emb is None:
-                raise RuntimeError(f"Cannot extract SAM image_embeddings from output type={type(out)}")
+                raise RuntimeError("Failed to extract image embeddings using get_image_embeddings().")
+                
             vec = img_emb.mean(dim=(2, 3))  # (B, 256)
             return vec.detach()
 

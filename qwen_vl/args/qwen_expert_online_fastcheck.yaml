@@ -10,7 +10,7 @@ model_path_7b: "/home/ma-user/work/lbx/models/Qwen2-VL-7B-Instruct" # 请修改�
 
 suffix: "_expert_online_fastcheck"
 
-epochs_per_stage: 17
+epochs_per_stage: 4
 max_latent_stage: 5
 pad_latent_to_max: True
 
@@ -20,7 +20,7 @@ resume: 0
 bf16: True
 batch_size_training: 2
 gradient_accumulation_steps: 1
-num_epochs: 2
+num_epochs: 16
 lr: !!float "4e-5"
 
 # Also reduce dataset at the dataset-loading level.
@@ -69,7 +69,7 @@ expert:
   format_overfit_test:
     enabled: True
     dataset_size: 16
-    num_epochs: 2
+    num_epochs:16
     stage: "skip_all_steps"
     check_samples: 8
 
