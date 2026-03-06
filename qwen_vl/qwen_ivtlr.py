@@ -1024,7 +1024,14 @@ class IVTLR(nn.Module):
 
                         hs_all = torch.cat(hs_list, dim=0)  # (sumK, D)
                         tt_all = torch.cat(t_list2, dim=0)  # (sumK, d)
+                        
+                        # ====== [新增] 强制对齐到 projector 权重的数据类型 ======
+                        layer_dtype = self.expert_projectors[e].weight.dtype
+                        hs_all = hs_all.to(layer_dtype)
+                        tt_all = tt_all.to(layer_dtype)
+                        
                         proj = self.expert_projectors[e](hs_all)  # (sumK, d)
+                        
                         if self.expert_runtime.normalize_student:
                             proj = F.normalize(proj, dim=-1)
 

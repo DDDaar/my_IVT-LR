@@ -131,6 +131,9 @@ class OnlineTeacherManager:
         """
         model = self._load_model(expert)
 
+        # ====== [新增] 获取当前模型实际的 dtype ======
+        model_dtype = next(model.parameters()).dtype
+        
         if expert == "sam":
             if images is None:
                 raise ValueError("SAM online teacher requires raw images (PIL/np arrays) passed as `images`.")
@@ -139,7 +142,10 @@ class OnlineTeacherManager:
                 raise RuntimeError("SAM processor is not loaded")
 
             inputs = processor(images=images, return_tensors="pt")
-            pv = inputs["pixel_values"].to(self.device)
+            
+            # ====== [修改] 强制将输入对齐到 model_dtype ======
+            pv = inputs["pixel_values"].to(self.device).to(model_dtype)
+
             out = model(pixel_values=pv)
 
             # SamModel outputs image_embeddings: (B, 256, 64, 64) typically.
@@ -158,7 +164,8 @@ class OnlineTeacherManager:
         else:
             pv = pixel_values
 
-        pv = pv.to(self.device)
+        # ====== [修改] 同样强制将输入对齐到 model_dtype ======
+        pv = pv.to(self.device).to(model_dtype)
 
         out = model(pixel_values=pv)
 
@@ -195,6 +202,20 @@ def infer_teacher_dim_from_source(expert: str, source: str) -> int:
         # SamModel image_embeddings channel dim is 256 for vit-b/l/h in transformers.
         return 256
 
+    
+    # ====== 新增对 depth 的维度硬编码拦截 ======
+    if expert == "depth":
+        path_lower = path.lower()
+        src_lower = src.lower()
+        if "large" in path_lower or "vitl" in src_lower:
+            return 1024
+        elif "base" in path_lower or "vitb" in src_lower:
+            return 768
+        elif "small" in path_lower or "vits" in src_lower:
+            return 384
+        return 1024  # 默认 fallback 到 1024
+    # ============================================
+    
     from transformers import AutoConfig
 
     cfg = AutoConfig.from_pretrained(path, trust_remote_code=True)

@@ -28,7 +28,8 @@ debug: True
 
 expert:
   enabled: True
-  experts: ["sam", "dinov2", "depth"]
+  experts: ["sam"]
+  # experts: ["sam", "dinov2", "depth"]
 
   token_strings:
     sam: "<|sam_feature|>"
@@ -67,7 +68,7 @@ expert:
   #   expert tokens appear before "Therefore, the answer is ..."
   format_overfit_test:
     enabled: True
-    dataset_size: 8
+    dataset_size: 16
     num_epochs: 2
     stage: "skip_all_steps"
     check_samples: 8
