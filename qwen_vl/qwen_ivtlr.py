@@ -971,13 +971,12 @@ class IVTLR(nn.Module):
                                         continue
                                     vec_all = self._teacher_online.get_vector(e, images=images)  # (B, d)
                                 else:
+                                    images = kwargs.get("images", None) # 【新增】获取原始图像
                                     pv = pixel_values
                                     if pv.ndim == 5 and pv.size(1) == 1:
                                         pv = pv[:, 0]
-                                    vec_all = self._teacher_online.get_vector(e, pixel_values=pv)  # (B, d)
-                                vec_all_cpu = vec_all.detach().to("cpu")
-                                for j in missing:
-                                    t_list[j] = vec_all_cpu[j]
+                                    # 【新增】把 images 参数也传进去
+                                    vec_all = self._teacher_online.get_vector(e, pixel_values=pv, images=images)  # (B, d)
 
                                 if (
                                     self.expert_runtime.teacher_mode == "hybrid"

@@ -83,7 +83,6 @@ def get_dataset(dataset, tokenizer, processor, max_size=1000000000, keep_image: 
             "idx": sample["idx"],
         }
         if keep_image:
-            # Keep raw image for online SAM teacher extraction.
             sample["image"] = image
         
         return sample

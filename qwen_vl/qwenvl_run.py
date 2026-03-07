@@ -1052,9 +1052,9 @@ def main():
 
         
 
-    keep_image = False
+    keep_image = True
     if expert_runtime is not None and getattr(expert_runtime, "enabled", False):
-        if expert_runtime.teacher_mode in ("online", "hybrid") and "sam" in expert_runtime.experts:
+        if expert_runtime.teacher_mode in ("online", "hybrid"):
             keep_image = True
 
     base_dataset_train = get_dataset(

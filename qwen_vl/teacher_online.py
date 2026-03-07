@@ -157,20 +157,26 @@ class OnlineTeacherManager:
             vec = img_emb.mean(dim=(2, 3))  # (B, 256)
             return vec.detach()
 
-        if pixel_values is None:
-            raise ValueError(f"expert={expert} requires pixel_values for online extraction.")
-
-        # pixel_values can be (B, 1, 3, H, W) for single-image setups. Flatten that.
-        if pixel_values.ndim == 5 and pixel_values.size(1) == 1:
-            pv = pixel_values[:, 0]
+        # ====== 【新增核心修改】如果传入了原始 images，并且有对应的处理器 (Dinov2/Depth) ======
+        if images is not None and self._processors.get(expert) is not None:
+            processor = self._processors[expert]
+            inputs = processor(images=images, return_tensors="pt")
+            pv = inputs["pixel_values"].to(self.device).to(model_dtype)
         else:
-            pv = pixel_values
+            # 如果没有原始图像，退化回使用传入的 pixel_values (兼容其他标准模型如 Chameleon)
+            if pixel_values is None:
+                print('no no no image!!!!!!!!!!!!!!')
+                raise ValueError(f"expert={expert} requires pixel_values for online extraction.")
 
-        # ====== [修改] 同样强制将输入对齐到 model_dtype ======
-        pv = pv.to(self.device).to(model_dtype)
+            # pixel_values can be (B, 1, 3, H, W) for single-image setups. Flatten that.
+            if pixel_values.ndim == 5 and pixel_values.size(1) == 1:
+                pv = pixel_values[:, 0]
+            else:
+                pv = pixel_values
+
+            pv = pv.to(self.device).to(model_dtype)
 
         out = model(pixel_values=pv)
-
         hs = getattr(out, "last_hidden_state", None)
         if hs is None:
             hss = getattr(out, "hidden_states", None)
