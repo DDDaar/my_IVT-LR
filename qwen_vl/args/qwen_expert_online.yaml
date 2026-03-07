@@ -10,7 +10,7 @@ model_path_7b: "/home/ma-user/work/lbx/models/Qwen2-VL-7B-Instruct" # 请修改�
 
 suffix: "_expert_online"
 
-epochs_per_stage: 17
+epochs_per_stage: 4
 max_latent_stage: 5
 pad_latent_to_max: True
 
@@ -29,7 +29,8 @@ debug: False
 # ============================================================
 expert:
   enabled: True
-  experts: ["sam", "dinov2", "depth"]
+  experts: ["sam"]
+  # experts: ["sam", "dinov2", "depth"]
 
   # Make them normal tokens so decode(skip_special_tokens=True) keeps them visible.
   # NOTE: Must be single-token (enforced by code). With `add_tokens`, it will be single-token.
@@ -71,6 +72,5 @@ expert:
       # - depth: "depth_anything_v2_vitl" -> hf:depth-anything/Depth-Anything-V2-Large (override if needed)
       models:
         sam: "vit_h"
-        dinov2: "dinov2_vitl14"
+        dinov2: "dinov2-base"
         depth: "depth_anything_v2_vitl"
-

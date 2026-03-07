@@ -1130,14 +1130,18 @@ def main():
 
     collator = MyCollator(tokenizer, latent_id=latent_id, label_pad_token_id=-100)
 
+    
     # Preview stage formats before training starts.
-    if rank == 0 and expert_runtime is not None:
+    if expert_runtime is not None:  # 🔥 去掉 rank == 0 的限制，让所有卡都参与生成数据
         try:
             stages = sorted({e // configs.epochs_per_stage for e in range(configs.num_epochs)})
             preview_stages = stages + [configs.max_latent_stage + 1]
             preview_stages = sorted(set(preview_stages))
-            print(f"[Stage Preview] stages={preview_stages}")
+            if rank == 0:
+                print(f"[Stage Preview] stages={preview_stages}")
+                
             for st in preview_stages:
+                # 所有 GPU 都会调用这个函数，顺利完成底层的 broadcast 同步
                 ds_preview = get_cot_latent_dataset(
                     st,
                     base_dataset_train.select(range(1)),
@@ -1149,22 +1153,60 @@ def main():
                     no_special_marker=True,
                     shuffle=False,
                 )
-                ex = ds_preview[0]
-                ids = ex["input_ids"]
-                lbl = ex["labels"]
-                decoded = tokenizer.decode(ids, skip_special_tokens=False)
-                print("=" * 40)
-                print(f"[Stage {st}] input_len={len(ids)} labels_len={len(lbl)}")
-                # CE positions: where label != -100
-                ce_start = next((i for i, v in enumerate(lbl) if v != -100), None)
-                print(f"[Stage {st}] ce_start={ce_start}")
-                for e in expert_runtime.experts:
-                    tid = expert_runtime.token_ids[e]
-                    pos = [i for i, x in enumerate(ids) if x == tid]
-                    print(f"[Stage {st}] expert={e} token_pos={pos}")
-                print(decoded[-400:])
+                
+                # 🔥 但是只让 0 号卡负责打印预览结果
+                if rank == 0:
+                    ex = ds_preview[0]
+                    ids = ex["input_ids"]
+                    lbl = ex["labels"]
+                    decoded = tokenizer.decode(ids, skip_special_tokens=False)
+                    print("=" * 40)
+                    print(f"[Stage {st}] input_len={len(ids)} labels_len={len(lbl)}")
+                    ce_start = next((i for i, v in enumerate(lbl) if v != -100), None)
+                    print(f"[Stage {st}] ce_start={ce_start}")
+                    for e in expert_runtime.experts:
+                        tid = expert_runtime.token_ids[e]
+                        pos = [i for i, x in enumerate(ids) if x == tid]
+                        print(f"[Stage {st}] expert={e} token_pos={pos}")
+                    print(decoded[-400:])
         except Exception as e:
-            print(f"[Stage Preview] failed: {e}")
+            if rank == 0:
+                print(f"[Stage Preview] failed: {e}")
+    # # Preview stage formats before training starts.
+    # if rank == 0 and expert_runtime is not None:
+    #     try:
+    #         stages = sorted({e // configs.epochs_per_stage for e in range(configs.num_epochs)})
+    #         preview_stages = stages + [configs.max_latent_stage + 1]
+    #         preview_stages = sorted(set(preview_stages))
+    #         print(f"[Stage Preview] stages={preview_stages}")
+    #         for st in preview_stages:
+    #             ds_preview = get_cot_latent_dataset(
+    #                 st,
+    #                 base_dataset_train.select(range(1)),
+    #                 configs,
+    #                 start_id,
+    #                 latent_id,
+    #                 end_id,
+    #                 expert_runtime=expert_runtime,
+    #                 no_special_marker=True,
+    #                 shuffle=False,
+    #             )
+    #             ex = ds_preview[0]
+    #             ids = ex["input_ids"]
+    #             lbl = ex["labels"]
+    #             decoded = tokenizer.decode(ids, skip_special_tokens=False)
+    #             print("=" * 40)
+    #             print(f"[Stage {st}] input_len={len(ids)} labels_len={len(lbl)}")
+    #             # CE positions: where label != -100
+    #             ce_start = next((i for i, v in enumerate(lbl) if v != -100), None)
+    #             print(f"[Stage {st}] ce_start={ce_start}")
+    #             for e in expert_runtime.experts:
+    #                 tid = expert_runtime.token_ids[e]
+    #                 pos = [i for i, x in enumerate(ids) if x == tid]
+    #                 print(f"[Stage {st}] expert={e} token_pos={pos}")
+    #             print(decoded[-400:])
+    #     except Exception as e:
+    #         print(f"[Stage Preview] failed: {e}")
 
     # 训练循环
     # pdb.set_trace()
@@ -1247,22 +1289,22 @@ def main():
             
            # === 测试点：记录更新前的权重 ===
             old_weight = model_engine.module.base_causallm.base_model.model.model.language_model.layers[27].mlp.up_proj.lora_B.default.weight.detach().clone()
-            old_weight2 =  model_engine.module.head_gate[0].weight.detach().clone()
-            old_weight3 =  model_engine.module.layer_gate[0].weight.detach().clone()
+            # old_weight2 =  model_engine.module.head_gate[0].weight.detach().clone()
+            # old_weight3 =  model_engine.module.layer_gate[0].weight.detach().clone()
             model_engine.backward(loss)
             model_engine.step()
             
             # === 测试点：检查权重是否更新 ===
             new_weight = model_engine.module.base_causallm.base_model.model.model.language_model.layers[27].mlp.up_proj.lora_B.default.weight.detach().clone()
-            new_weight2 =  model_engine.module.head_gate[0].weight.detach().clone()
-            new_weight3 =  model_engine.module.layer_gate[0].weight.detach().clone()
+            # new_weight2 =  model_engine.module.head_gate[0].weight.detach().clone()
+            # new_weight3 =  model_engine.module.layer_gate[0].weight.detach().clone()
             diff = (new_weight - old_weight).abs().sum().item()
-            diff2 = (new_weight2 - old_weight2).abs().sum().item()
-            diff3 = (new_weight3 - old_weight3).abs().sum().item()
+            # diff2 = (new_weight2 - old_weight2).abs().sum().item()
+            # diff3 = (new_weight3 - old_weight3).abs().sum().item()
             if rank == 0:
                 print(f"layers.27.mlp.up_proj.lora_B.default.weight 权重变化量: {diff}")
-                print(f"head_gate_weight 权重变化量: {diff2}")
-                print(f"layer_gate.weight 权重变化量: {diff3}")
+                # print(f"head_gate_weight 权重变化量: {diff2}")
+                # print(f"layer_gate.weight 权重变化量: {diff3}")
             
             if wandb_run and rank == 0:
                 log_dict = {
@@ -1312,11 +1354,12 @@ def main():
             torch.cuda.empty_cache()
 
     # Post-training quick format check using training data as inference content.
-    if fast_cfg is not None and rank == 0:
+    if fast_cfg is not None:  # 🔥 同样去掉 rank == 0
         try:
             _run_format_check(model_engine.module, check_samples=int(fast_cfg.get("check_samples", 8)))
         except Exception as e:
-            print(f"[FastCheck] format check failed: {e}")
+            if rank == 0:
+                print(f"[FastCheck] format check failed: {e}")
 
 if __name__ == "__main__":
     main()

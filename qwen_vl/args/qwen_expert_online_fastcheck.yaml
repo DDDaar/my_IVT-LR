@@ -11,7 +11,7 @@ model_path_7b: "/home/ma-user/work/lbx/models/Qwen2-VL-7B-Instruct" # 请修改�
 suffix: "_expert_online_fastcheck"
 
 epochs_per_stage: 4
-max_latent_stage: 5
+max_latent_stage: 3
 pad_latent_to_max: True
 
 load_model_path: None
@@ -19,7 +19,7 @@ seed: 0
 resume: 0
 bf16: True
 batch_size_training: 2
-gradient_accumulation_steps: 1
+gradient_accumulation_steps: 8
 num_epochs: 16
 lr: !!float "4e-5"
 
@@ -68,8 +68,8 @@ expert:
   #   expert tokens appear before "Therefore, the answer is ..."
   format_overfit_test:
     enabled: True
-    dataset_size: 16
-    num_epochs:16
-    stage: "skip_all_steps"
+    dataset_size: 200
+    num_epochs: 16
     check_samples: 8
+    stage: "skip_all_steps"
 
