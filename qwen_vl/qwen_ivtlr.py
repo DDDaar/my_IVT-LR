@@ -917,6 +917,7 @@ class IVTLR(nn.Module):
 
         # Expert align loss: align K slots to a single gt vector per expert per image.
         # Only compute during training; generation/eval should not require teacher inputs.
+        expert_losses_dict = {} # 【新增】初始化存放各专家 loss 的字典
         if (
             self.training
             and self.expert_runtime is not None
@@ -927,7 +928,7 @@ class IVTLR(nn.Module):
                     final_hidden = outputs.hidden_states[-1]  # (B, final_S, D)
                     insert_offset = int(self.num_selected_patches) * int(max_n_latents)
                     align_losses = []
-                    expert_losses_dict = {} # 【新增】初始化存放各专家 loss 的字典
+
                   
                     for e in self.expert_runtime.experts:
                         token_id = int(self.expert_runtime.token_ids[e])

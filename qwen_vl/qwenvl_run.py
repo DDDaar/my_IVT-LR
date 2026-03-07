@@ -1025,7 +1025,7 @@ def main():
         
         # 选取部分数据用于调试或全量
         if configs.debug:
-            train_dataset = dataset["train"].select(range(400)).filter(has_image)
+            train_dataset = dataset["train"].select(range(40)).filter(has_image)
         else:
             train_dataset = dataset["train"].filter(has_image)
             
@@ -1040,7 +1040,7 @@ def main():
             return "image" in example and example["image"] is not None
 
         if configs.debug:
-            train_dataset = dataset["train"].select(range(400)).filter(has_image)
+            train_dataset = dataset["train"].select(range(40)).filter(has_image)
         else:
             train_dataset = dataset["train"].filter(has_image)
             
@@ -1141,8 +1141,8 @@ def main():
                 if ans_pos >= 0 and pos >= 0 and pos > ans_pos:
                     ok = False
             print(f"[FastCheck] sample={i} ok={ok}")
-            if not ok:
-                print(gen[-600:])
+            # if not ok:
+            print(gen[-600:])
 
 
     total_train_steps = 0

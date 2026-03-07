@@ -342,14 +342,15 @@ def load_inference_model(checkpoint_path, model_base_path, config_path: str = No
     processor.tokenizer = tokenizer
 
     lora_config = LoraConfig(
-        task_type="CAUSAL_LM",
-        target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
-        r=64,
-        lora_alpha=16,
-        lora_dropout=0.05,
-        bias="none",
-        inference_mode=False
-    )
+            task_type="CAUSAL_LM",
+            target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
+            modules_to_save=["embed_tokens", "lm_head"],  # 🌟【必须新增这一行】
+            r=64,
+            lora_alpha=16,
+            lora_dropout=0.05,
+            bias="none",
+            inference_mode=False
+        )
     base_model = get_peft_model(base_model, lora_config)
     
     latent_id = tokenizer.convert_tokens_to_ids("<|latent|>")
@@ -452,7 +453,7 @@ def process_func_scienceqa(example, idx):
         "gt_answer": answer,
     }
 
-def evaluate_scienceqa(model, processor, output_path="output/qwen2vl_scienceqa.json"):
+def evaluate_scienceqa(model, processor, output_path="output/qwen2vl_scienceqa.jsonl"):
     print("Loading ScienceQA dataset...")
     dataset = load_dataset("derek-thomas/ScienceQA")
     val_dataset = dataset["test"]
@@ -474,74 +475,93 @@ def evaluate_scienceqa(model, processor, output_path="output/qwen2vl_scienceqa.j
 
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
 
-    for ex in val_dataset:
-        input_text = ex["question_raw"]
-        
-        # 构造 Qwen 格式的 messages
-        messages = [{
-            "role": "user",
-            "content": [
-                {"type": "image", "image": ex["image_raw"], "resized_height": 280, "resized_width": 280},
-                {"type": "text", "text": input_text}
-            ]
-        }]
-        
-        # 应用 Chat Template
-        text = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-        # 添加 latent tokens
-        text = text + "<|latent|>" + "<|latent|>" + "<|latent|>"
-        
-        image_inputs, video_inputs = process_vision_info(messages)
-        inputs = processor(
-            text=[text],
-            images=image_inputs,
-            videos=video_inputs,
-            padding=True,
-            return_tensors="pt"
-        ).to(device)
-        
-        prompt_length = inputs["input_ids"].shape[1]
-        
-        generate_start_time = time.time()
-        with torch.no_grad():
-            outputs = model.generate(
-                input_ids=inputs["input_ids"],
-                attention_mask=inputs["attention_mask"],
-                pixel_values=inputs["pixel_values"],
-                image_grid_thw=inputs["image_grid_thw"],
-                max_new_tokens=512
-            )
-        generate_end_time = time.time()
-        sample_generate_time = generate_end_time - generate_start_time
-        total_generate_time += sample_generate_time
-        
-        generated_tokens = outputs[0, prompt_length:]
-        new_generated_text = processor.decode(generated_tokens, skip_special_tokens=True)
-        num_generated_tokens = len(generated_tokens)
-        total_generated_tokens += num_generated_tokens
+    # ================= 【修改点 1：在循环外打开文件（追加模式）】 =================
+    with open(output_path, "a", encoding="utf-8") as f_out:
+        for ex in val_dataset:
+            input_text = ex["question_raw"]
 
-        # 提取答案
-        pred_answer = extract_answer_scienceqa(new_generated_text)
-        gt_answer = ex["gt_answer"]
-        
-        is_correct = (pred_answer == gt_answer)
-        if is_correct:
-            correct += 1
+            # 构造 Qwen 格式的 messages
+            messages = [{
+                "role": "user",
+                "content": [
+                    {"type": "image", "image": ex["image_raw"], "resized_height": 280, "resized_width": 280},
+                    {"type": "text", "text": input_text}
+                ]
+            }]
+
+            # 应用 Chat Template
+            text = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+            # 添加 latent tokens
+            text = text + "<|latent|>" + "<|latent|>" + "<|latent|>"
+
+            image_inputs, video_inputs = process_vision_info(messages)
+            inputs = processor(
+                text=[text],
+                images=image_inputs,
+                videos=video_inputs,
+                padding=True,
+                return_tensors="pt"
+            ).to(device)
+
+            prompt_length = inputs["input_ids"].shape[1]
+
+            generate_start_time = time.time()
+            with torch.no_grad():
+                outputs = model.generate(
+                    input_ids=inputs["input_ids"],
+                    attention_mask=inputs["attention_mask"],
+                    pixel_values=inputs["pixel_values"],
+                    image_grid_thw=inputs["image_grid_thw"],
+                    max_new_tokens=512
+                )
+            generate_end_time = time.time()
+            sample_generate_time = generate_end_time - generate_start_time
+            total_generate_time += sample_generate_time
+
+            generated_tokens = outputs[0, prompt_length:]
+            new_generated_text = processor.decode(generated_tokens, skip_special_tokens=True)
+            num_generated_tokens = len(generated_tokens)
+            total_generated_tokens += num_generated_tokens
+
+            # 提取答案
+            pred_answer = extract_answer_scienceqa(new_generated_text)
+            gt_answer = ex["gt_answer"]
+
+            is_correct = (pred_answer == gt_answer)
+            if is_correct:
+                correct += 1
+
+            total += 1
+
+            # ================= 【修改点 2：单条记录构建并立即写入】 =================
+            idx_str = str(ex["idx"])
+            # 构建单条样本的结果字典
+            single_result = {
+                "id": idx_str,
+                "pred": pred_answer,
+                "gt": gt_answer,
+                "correct": is_correct,
+                "generated_text": new_generated_text
+            }
             
-        total += 1
-        
-        # 记录结果
-        idx_str = str(ex["idx"])
-        results[idx_str] = {
-            "pred": pred_answer,
-            "gt": gt_answer,
-            "correct": is_correct,
-            "generated_text": new_generated_text
-        }
-        
-        if total % 10 == 0:
-            print(f"Processed {total}, Current Accuracy: {correct/total:.2%}")
-            logging.info(f"[ScienceQA] Processed {total}, Accuracy: {correct/total:.2%}")
+            # 将单条结果转为 JSON 字符串，加上换行符，写入文件
+            f_out.write(json.dumps(single_result, ensure_ascii=False) + "\n")
+            # 强制刷新缓存，立刻写入磁盘！即使下一步崩溃，这条数据也保住了
+            f_out.flush() 
+            # =========================================================================
+            
+            # 记录结果
+            idx_str = str(ex["idx"])
+            results[idx_str] = {
+                "pred": pred_answer,
+                "gt": gt_answer,
+                "correct": is_correct,
+                "generated_text": new_generated_text
+            }
+
+            if total % 10 == 0:
+                print(f"Processed {total}, Current Accuracy: {correct/total:.2%}")
+                logging.info(f"[ScienceQA] Processed {total}, Accuracy: {correct/total:.2%}")
 
     final_acc = correct / total if total > 0 else 0
     avg_tokens = total_generated_tokens / total if total > 0 else 0
@@ -549,14 +569,17 @@ def evaluate_scienceqa(model, processor, output_path="output/qwen2vl_scienceqa.j
     
     print(f"\n[Final ScienceQA Results] Accuracy: {final_acc:.2%}, Avg Tokens: {avg_tokens:.1f}, Avg Time: {avg_time:.3f}s")
     
-    # 保存结果
-    output_data = {
-        "accuracy": final_acc,
-        "avg_tokens": avg_tokens,
-        "results": results
-    }
-    with open(output_path, "w", encoding="utf-8") as f:
-        json.dump(output_data, f, ensure_ascii=False, indent=2)
+    # 🌟 将原本在这里的 output_data 构造和 json.dump(...) 代码全部删除 🌟
+    # 我们可以把最终的汇总信息（准确率、平均耗时等）以一条特殊记录的形式追加到文件末尾
+    with open(output_path, "a", encoding="utf-8") as f_out:
+        summary_result = {
+            "summary_type": "final_metrics",
+            "accuracy": final_acc,
+            "avg_tokens": avg_tokens,
+            "avg_time": avg_time,
+            "total_samples": total
+        }
+        f_out.write(json.dumps(summary_result, ensure_ascii=False) + "\n")
 
 
 # ==========================================

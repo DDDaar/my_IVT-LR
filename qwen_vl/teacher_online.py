@@ -108,9 +108,11 @@ class OnlineTeacherManager:
             model = SamModel.from_pretrained(path)
             self._processors[expert] = processor
         else:
-            from transformers import AutoModel
-
+            # ✅ 【修改】：为 dinov2 和 depth 也加载专门的 ImageProcessor
+            from transformers import AutoModel, AutoImageProcessor
+            processor = AutoImageProcessor.from_pretrained(path)
             model = AutoModel.from_pretrained(path, trust_remote_code=True)
+            self._processors[expert] = processor
 
         model.eval()
         model.to(self.device)
