@@ -23,7 +23,10 @@ except Exception:  # pragma: no cover
 from teacher_cache import load_teacher_vector, save_teacher_vector
 from teacher_online import OnlineTeacherManager
 
-Outputs = namedtuple("Outputs", ["loss", "inputs_embeds", "logits"])
+# 修改前：Outputs = namedtuple("Outputs", ["loss", "inputs_embeds", "logits"])
+# 修改后：
+Outputs = namedtuple("Outputs", ["loss", "inputs_embeds", "logits", "expert_losses"])
+
 MAX_N_LATENT = 4
 
 
@@ -924,7 +927,8 @@ class IVTLR(nn.Module):
                     final_hidden = outputs.hidden_states[-1]  # (B, final_S, D)
                     insert_offset = int(self.num_selected_patches) * int(max_n_latents)
                     align_losses = []
-
+                    expert_losses_dict = {} # 【新增】初始化存放各专家 loss 的字典
+                  
                     for e in self.expert_runtime.experts:
                         token_id = int(self.expert_runtime.token_ids[e])
                         # teacher vector: prefer offline-provided batch tensors
@@ -1037,13 +1041,19 @@ class IVTLR(nn.Module):
 
                         if self.expert_runtime.align_loss == "cos":
                             l = 1.0 - F.cosine_similarity(proj, tt_all, dim=-1)
-                            align_losses.append(l.mean())
+                            l_mean = l.mean()
+                            align_losses.append(l_mean)
+                            expert_losses_dict[e] = l_mean.detach() # 【新增】
                         elif self.expert_runtime.align_loss in ("mse+cos", "cos+mse"):
-                            l1 = (proj - tt_all).pow(2).mean()
+                            l_mse = (proj - tt_all).pow(2).sum(dim=-1).mean()
                             l2 = (1.0 - F.cosine_similarity(proj, tt_all, dim=-1)).mean()
-                            align_losses.append(l1 + l2)
+                            l_total = l1 + l2
+                            align_losses.append(l_total)
+                            expert_losses_dict[e] = l_total.detach() # 【新增】
                         else:
-                            align_losses.append((proj - tt_all).pow(2).mean())
+                            l_mse = (proj - tt_all).pow(2).sum(dim=-1).mean()
+                            align_losses.append(l_mse)
+                            expert_losses_dict[e] = l_mse.detach() # 【新增】
 
                     if len(align_losses) > 0:
                         loss = loss + float(self.expert_runtime.align_weight) * torch.stack(align_losses).mean()
@@ -1056,10 +1066,9 @@ class IVTLR(nn.Module):
         if torch.isnan(loss):
             print("🚨 训练崩溃: 计算出的 Loss 为 NaN！优化器将跳过更新。")
             #import pdb; pdb.set_trace()
-        # -------------------
         
-        return Outputs(loss=loss, inputs_embeds=inputs_embeds, logits=logits)
-
+        # 【修改】将 expert_losses_dict 加入返回结果中
+        return Outputs(loss=loss, inputs_embeds=inputs_embeds, logits=logits, expert_losses=expert_losses_dict)
 
     def train(self, mode=True):
         self.base_causallm.train(mode)

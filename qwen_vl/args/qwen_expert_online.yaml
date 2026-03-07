@@ -1,5 +1,5 @@
 project: ivtlr
-save_path: ./qwen_vl/output
+save_path: ./output
 name: placeholder_name
 
 dataset_name: scienceqa
@@ -11,7 +11,7 @@ model_path_7b: "/home/ma-user/work/lbx/models/Qwen2-VL-7B-Instruct" # 请修改�
 suffix: "_expert_online"
 
 epochs_per_stage: 4
-max_latent_stage: 5
+max_latent_stage: 3
 pad_latent_to_max: True
 
 load_model_path: None

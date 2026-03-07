@@ -581,6 +581,7 @@ from teacher_online import infer_teacher_dim_from_source
 lora_config = LoraConfig(
     task_type="CAUSAL_LM",
     target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
+    modules_to_save=["embed_tokens", "lm_head"], # 🌟 新增这一行！非常关键！
     r=64,
     lora_alpha=16,
     lora_dropout=0.05,
@@ -861,6 +862,10 @@ def main():
     tokenizer = AutoTokenizer.from_pretrained(model_path, use_fast=False, trust_remote_code=True)
     tokenizer.padding_side = "right"
     tokenizer.pad_token = tokenizer.eos_token
+    
+    # 【新增】：在添加特殊 token 之前，记录原始模型词表大小
+    original_vocab_size = len(tokenizer)
+    
     tokenizer.add_tokens("<|start-latent|>")
     tokenizer.add_tokens("<|end-latent|>")
     tokenizer.add_tokens("<|latent|>")
@@ -924,8 +929,7 @@ def main():
     visual_start_id = tokenizer.convert_tokens_to_ids("<|vision_start|>")
     visual_end_id = tokenizer.convert_tokens_to_ids("<|vision_end|>")
 
-    #  LoRA配置和token嵌入初始化
-    model = get_peft_model(model, lora_config)
+   
 
     loaded = False
 
@@ -944,6 +948,32 @@ def main():
         # The input embeddings and lm heads are tied in GPT2. So the code below is not necessary
         lm_head = model.lm_head
         lm_head.weight.data[token_id] = lm_head.weight.data[target_id]
+    
+    
+    
+    # ================= 【新增核心代码】 =================
+    # 定义梯度 Hook 函数：把前 original_vocab_size 个词的梯度强制置 0
+    def freeze_original_embeddings_hook(grad):
+        # 必须 clone，避免 inplace 操作报错
+        grad_clone = grad.clone()
+        # 将原始词表部分的梯度清零
+        grad_clone[:original_vocab_size, :] = 0
+        return grad_clone
+
+    # 给 Input Embedding 的权重挂上 Hook
+    if embeddings.weight.requires_grad:
+        embeddings.weight.register_hook(freeze_original_embeddings_hook)
+        print(f"已锁定前 {original_vocab_size} 个 Input Embeddings 不更新")
+
+    # 给 Output LM Head 的权重挂上 Hook
+    if model.lm_head.weight.requires_grad:
+        model.lm_head.weight.register_hook(freeze_original_embeddings_hook)
+        print(f"已锁定前 {original_vocab_size} 个 LM Head 不更新")
+    # ===================================================
+    
+     #  LoRA配置和token嵌入初始化
+    model = get_peft_model(model, lora_config)
+    
     
     model.print_trainable_parameters()
 
@@ -995,7 +1025,7 @@ def main():
         
         # 选取部分数据用于调试或全量
         if configs.debug:
-            train_dataset = dataset["train"].select(range(20)).filter(has_image)
+            train_dataset = dataset["train"].select(range(400)).filter(has_image)
         else:
             train_dataset = dataset["train"].filter(has_image)
             
@@ -1010,7 +1040,7 @@ def main():
             return "image" in example and example["image"] is not None
 
         if configs.debug:
-            train_dataset = dataset["train"].select(range(20)).filter(has_image)
+            train_dataset = dataset["train"].select(range(400)).filter(has_image)
         else:
             train_dataset = dataset["train"].filter(has_image)
             
@@ -1168,7 +1198,7 @@ def main():
                         tid = expert_runtime.token_ids[e]
                         pos = [i for i, x in enumerate(ids) if x == tid]
                         print(f"[Stage {st}] expert={e} token_pos={pos}")
-                    print(decoded[-400:])
+                    print(decoded[:])
         except Exception as e:
             if rank == 0:
                 print(f"[Stage Preview] failed: {e}")
@@ -1243,6 +1273,21 @@ def main():
             sampler=DistributedSampler(dataset_train, shuffle=True),
         )
 
+        
+        # ================= [新增：每个 Epoch 开始前推理验证 1 个样本] =================
+        if expert_runtime is not None and getattr(expert_runtime, "enabled", False):
+            if rank == 0:
+                print(f"\n========== Epoch {epoch+1} 开始：格式遵循实时验证 ==========")
+            try:
+                # 所有进程共同参与 generate (DeepSpeed ZeRO-3 必须要求)，只测 1 个样本
+                _run_format_check(model_engine.module, check_samples=1)
+            except Exception as e:
+                if rank == 0:
+                    print(f"[Epoch {epoch+1} FastCheck] format check failed: {e}")
+            if rank == 0:
+                print("============================================================\n")
+        # ==============================================================================
+        
         model_engine.train()
         # total_length是实际参数更新的次数
         total_length = len(train_dataloader) // configs.gradient_accumulation_steps
@@ -1284,8 +1329,14 @@ def main():
             batch = {key: (batch[key].to(rank) if torch.is_tensor(batch[key]) else batch[key]) for key in batch.keys()}
 
             outputs = model_engine(**batch)
+            # 【新增】安全获取 expert_losses 字典
+            expert_losses = getattr(outputs, "expert_losses", {})
             loss = outputs.loss
-            print(f"loss: {loss}")
+            if rank == 0:
+                print(f"loss: {loss.item():.4f}")
+                for e_name, e_loss in expert_losses.items():
+                    print(f"  expert_{e_name}_loss: {e_loss.item():.4f}")
+                    
             
            # === 测试点：记录更新前的权重 ===
             old_weight = model_engine.module.base_causallm.base_model.model.model.language_model.layers[27].mlp.up_proj.lora_B.default.weight.detach().clone()
@@ -1313,7 +1364,12 @@ def main():
                     "train/loss": loss.detach().float()
                     # * configs.gradient_accumulation_steps,
                 }
+                # 【新增】将每个专家的 loss 记录到 Wandb
+                for e_name, e_loss in expert_losses.items():
+                    log_dict[f"train/expert_{e_name}_loss"] = e_loss.float()
+                    
                 wandb_run.log(log_dict)
+
             # print("line432")
             pbar.set_description(
                 f"Training Epoch: {epoch+1}/{configs.num_epochs}, batch {step}/{len(train_dataloader)} "
@@ -1356,7 +1412,7 @@ def main():
     # Post-training quick format check using training data as inference content.
     if fast_cfg is not None:  # 🔥 同样去掉 rank == 0
         try:
-            _run_format_check(model_engine.module, check_samples=int(fast_cfg.get("check_samples", 8)))
+            _run_format_check(model_engine.module, check_samples=int(fast_cfg.get("check_samples", 4)))
         except Exception as e:
             if rank == 0:
                 print(f"[FastCheck] format check failed: {e}")

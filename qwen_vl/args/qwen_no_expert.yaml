@@ -1,6 +1,6 @@
 project: ivtlr
 # Where to save checkpoints (relative path is OK).
-save_path: ./qwen_vl/output
+save_path: ./output
 
 # `qwenvl_run.py` will auto-update `name` to: {dataset_name}_qwen2vl_{model_type}_IVTLR{suffix}
 name: placeholder_name

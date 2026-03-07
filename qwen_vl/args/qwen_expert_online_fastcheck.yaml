@@ -1,5 +1,5 @@
 project: ivtlr
-save_path: ./qwen_vl/output
+save_path: ./output
 name: placeholder_name
 
 dataset_name: scienceqa
@@ -19,7 +19,7 @@ seed: 0
 resume: 0
 bf16: True
 batch_size_training: 2
-gradient_accumulation_steps: 8
+gradient_accumulation_steps: 1
 num_epochs: 16
 lr: !!float "4e-5"
 
@@ -37,7 +37,7 @@ expert:
     depth: "<|depth_feature|>"
 
   slots:
-    sam: 2
+    sam: 4
     dinov2: 2
     depth: 2
 
