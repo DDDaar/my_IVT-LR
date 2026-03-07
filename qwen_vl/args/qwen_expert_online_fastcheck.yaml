@@ -28,8 +28,8 @@ debug: True
 
 expert:
   enabled: True
-  experts: ["dinov2"]
-  # experts: ["sam", , "depth"]
+  experts: ["sam"]
+  # experts: ["sam",, "depth","dinov2"]
 
   token_strings:
     sam: "<|sam_feature|>"

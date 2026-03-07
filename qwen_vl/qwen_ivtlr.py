@@ -978,6 +978,7 @@ class IVTLR(nn.Module):
                                     # 【新增】把 images 参数也传进去
                                     vec_all = self._teacher_online.get_vector(e, pixel_values=pv, images=images)  # (B, d)
 
+                                    
                                 if (
                                     self.expert_runtime.teacher_mode == "hybrid"
                                     and self.expert_runtime.teacher_write_back
