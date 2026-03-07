@@ -798,21 +798,29 @@ def main():
     # config读取
     configs = Config(config_dict)
 
-    # ================= [新增代码] 开始 =================
-    # 动态构建实验名称，格式为: {数据集}_qwen2vl_{模型大小}_IVTLR
-    # 这样每次修改 yaml 中的 dataset_name 或 model_type，输出目录会自动更新
+# ================= [新增代码] 开始 =================
+    # 动态构建实验名称，格式为: {数据集}_qwen2vl_{模型大小}_IVTLR_{专家组合}{suffix}
     dataset_name = getattr(configs, "dataset_name", "m3cot")
     model_type = getattr(configs, "model_type", "7B")
     suffix = getattr(configs, "suffix", "")
     
-    new_name = f"{dataset_name}_qwen2vl_{model_type}_IVTLR{suffix}" 
+    # --- 新增：从 config_dict 中提取启用的专家模型 ---
+    expert_str = ""
+    expert_cfg = config_dict.get("expert", {})
+    if isinstance(expert_cfg, dict) and expert_cfg.get("enabled", False):
+        experts = expert_cfg.get("experts", [])
+        if experts:
+            # 将专家列表用下划线连接，例如 "_sam_dinov2"
+            expert_str = "_" + "_".join(experts)
+    # ------------------------------------------------
     
-    # 如果想保留 yaml 里自定义的 name 前缀，也可以做拼接，这里建议直接覆盖以保证规范
+    # 将专家字符串拼接到实验名称中
+    new_name = f"{dataset_name}_qwen2vl_{model_type}_IVTLR{expert_str}{suffix}" 
+    
     if configs.name != new_name:
         print(f"[Config Auto-Update] Changing experiment name from '{configs.name}' to '{new_name}'")
         configs.name = new_name
     # ================= [新增代码] 结束 =================
-
     
     set_seed(configs.seed)
     save_dir = os.path.join(configs.save_path, configs.name)
@@ -1025,7 +1033,7 @@ def main():
         
         # 选取部分数据用于调试或全量
         if configs.debug:
-            train_dataset = dataset["train"].select(range(40)).filter(has_image)
+            train_dataset = dataset["train"].select(range(400)).filter(has_image)
         else:
             train_dataset = dataset["train"].filter(has_image)
             
@@ -1040,7 +1048,7 @@ def main():
             return "image" in example and example["image"] is not None
 
         if configs.debug:
-            train_dataset = dataset["train"].select(range(40)).filter(has_image)
+            train_dataset = dataset["train"].select(range(400)).filter(has_image)
         else:
             train_dataset = dataset["train"].filter(has_image)
             

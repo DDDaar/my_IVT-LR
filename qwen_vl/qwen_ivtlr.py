@@ -972,12 +972,25 @@ class IVTLR(nn.Module):
                                     vec_all = self._teacher_online.get_vector(e, images=images)  # (B, d)
                                 else:
                                     images = kwargs.get("images", None) # 【新增】获取原始图像
+                                    
+                                    # ===== 【请在这里补上下面这 4 行代码】 =====
+                                    if images is None:
+                                        if self.expert_runtime.teacher_require:
+                                            raise ValueError(f"Missing `images` in batch for online {e} teacher.")
+                                        continue
+                                    # ==========================================
+
                                     pv = pixel_values
                                     if pv.ndim == 5 and pv.size(1) == 1:
                                         pv = pv[:, 0]
                                     # 【新增】把 images 参数也传进去
                                     vec_all = self._teacher_online.get_vector(e, pixel_values=pv, images=images)  # (B, d)
 
+                                    
+                                # ===== 在这里补充特征回填逻辑 =====
+                                for j in missing:
+                                    t_list[j] = vec_all[j]
+                                # ==================================
                                     
                                 if (
                                     self.expert_runtime.teacher_mode == "hybrid"

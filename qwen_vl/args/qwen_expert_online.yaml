@@ -2,7 +2,7 @@ project: ivtlr
 save_path: ./output
 name: placeholder_name
 
-dataset_name: scienceqa
+dataset_name: m3cot
 
 model_type: "2B"
 model_path_2b: "/home/ma-user/work/lbx/models/Qwen2-VL-2B-Instruct" # 请修改为实际2B模型路径
@@ -41,9 +41,9 @@ expert:
 
   # Slot count: K hidden states per expert align to 1 gt teacher vector, averaged.
   slots:
-    sam: 2
-    dinov2: 2
-    depth: 2
+    sam: 4
+    dinov2: 4
+    depth: 4
 
   # Text prefix inserted after CoT and before "Therefore, the answer is ..."
   prefix_text:
