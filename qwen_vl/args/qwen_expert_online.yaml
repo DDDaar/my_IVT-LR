@@ -29,7 +29,7 @@ debug: False
 # ============================================================
 expert:
   enabled: True
-  experts: ["sam"]
+  experts: ["dinov2"]
   # experts: ["sam", "dinov2", "depth"]
 
   # Make them normal tokens so decode(skip_special_tokens=True) keeps them visible.
