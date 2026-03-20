@@ -1,6 +1,5 @@
 import argparse
 import inspect
-import json
 import os
 import re
 from types import MethodType
@@ -777,16 +776,6 @@ def main():
     }
     grpo_cfg = GRPOConfig(**_to_supported_kwargs(GRPOConfig, grpo_kwargs))
 
-    # ---------------------------------------------------------------------------
-    # Custom data collator: restore prompt from JSON string back to list[dict]
-    # so that TRL's is_conversational() check passes for multimodal GRPO.
-    # ---------------------------------------------------------------------------
-    def _grpo_collator(features):
-        for f in features:
-            if isinstance(f.get("prompt"), str):
-                f["prompt"] = json.loads(f["prompt"])
-        return features
-
     trainer_kwargs = {
         "model": model,
         "reward_funcs": reward_funcs,
@@ -800,10 +789,6 @@ def main():
         trainer_kwargs["tokenizer"] = tokenizer
 
     trainer = GRPOTrainer(**trainer_kwargs)
-
-    # Override the default identity collator with ours.
-    trainer.data_collator = _grpo_collator
-
     trainer.train()
 
     final_dir = os.path.join(output_dir, "final")

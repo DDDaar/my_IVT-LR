@@ -1,5 +1,4 @@
 import functools
-import json
 import re
 from typing import Dict, List
 
@@ -98,11 +97,8 @@ def _build_train_row(example: Dict, processor, latent_tokens_per_sample: int, da
     valid_letters = ",".join([chr(65 + i) for i in range(len(choices))])
     answer_letter = _normalize_answer_to_letter(example["answer"], choices)
 
-    # Store prompt as JSON string to prevent Arrow serialization from
-    # flattening the nested list[dict] structure.  The collator in
-    # qwenvl_grpo_run.py will deserialize it back before the trainer sees it.
     return {
-        "prompt": json.dumps(messages, ensure_ascii=False),
+        "prompt": messages,
         "image": image,
         "ground_truth": answer_letter,
         "valid_letters": valid_letters,
