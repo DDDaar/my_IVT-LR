@@ -77,18 +77,18 @@ def _build_train_row(example: Dict, processor, latent_tokens_per_sample: int, da
     choices = example["choices"]
     question_text = _format_question(example["question"], choices)
 
-    # Align with SFT final-stage input style: chat template + latent placeholders.
+    # Keep raw conversational structure for TRL multimodal GRPO.
+    # Do not pre-apply chat template here; trainer will apply it internally.
+    prompt_text = f"{question_text}{_latent_suffix(latent_tokens_per_sample)}\n"
     messages = [
         {
             "role": "user",
             "content": [
-                {"type": "image", "image": example["image"], "resized_height": 280, "resized_width": 280},
-                {"type": "text", "text": question_text},
+                {"type": "image", "resized_height": 280, "resized_width": 280},
+                {"type": "text", "text": prompt_text},
             ],
         }
     ]
-    prompt = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-    prompt = f"{prompt}{_latent_suffix(latent_tokens_per_sample)}\n"
 
     image = example["image"]
     if image is not None and getattr(image, "mode", "RGB") != "RGB":
@@ -98,7 +98,7 @@ def _build_train_row(example: Dict, processor, latent_tokens_per_sample: int, da
     answer_letter = _normalize_answer_to_letter(example["answer"], choices)
 
     return {
-        "prompt": prompt,
+        "prompt": messages,
         "image": image,
         "ground_truth": answer_letter,
         "valid_letters": valid_letters,

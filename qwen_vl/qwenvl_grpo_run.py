@@ -502,6 +502,24 @@ def _to_supported_kwargs(callable_obj, kwargs: Dict[str, Any]) -> Dict[str, Any]
     return {k: v for k, v in kwargs.items() if k in sig.parameters}
 
 
+def _align_special_token_ids(model, tokenizer) -> Dict[str, Any]:
+    updates: Dict[str, Any] = {}
+    for attr in ("eos_token_id", "bos_token_id", "pad_token_id"):
+        tok_val = getattr(tokenizer, attr, None)
+        if hasattr(model, "config"):
+            cur = getattr(model.config, attr, None)
+            if cur != tok_val:
+                setattr(model.config, attr, tok_val)
+                updates[attr] = tok_val
+        gen_cfg = getattr(model, "generation_config", None)
+        if gen_cfg is not None:
+            cur = getattr(gen_cfg, attr, None)
+            if cur != tok_val:
+                setattr(gen_cfg, attr, tok_val)
+                updates[attr] = tok_val
+    return updates
+
+
 def _parse_valid_letters(raw_letters: Any) -> Set[str]:
     if raw_letters is None:
         return set()
@@ -696,6 +714,9 @@ def main():
         processor.tokenizer.padding_side = tokenizer.padding_side
 
     model.resize_token_embeddings(len(tokenizer))
+    token_id_updates = _align_special_token_ids(model, tokenizer)
+    if token_id_updates:
+        print(f"[Init] Aligned model token ids with tokenizer: {token_id_updates}")
     if bool(cfg.get("gradient_checkpointing", True)):
         model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
 
