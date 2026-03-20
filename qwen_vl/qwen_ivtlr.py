@@ -32,7 +32,7 @@ class IVTLR(nn.Module):
         image_token_id,
         visual_start_id,
         visual_end_id,
-        num_selected_patches: int = 8,
+        num_selected_patches: int = 0,
         model_path: str = None,  # [新增参数]
     ):
 

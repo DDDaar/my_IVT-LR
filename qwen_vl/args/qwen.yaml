@@ -9,7 +9,7 @@ model_type: "2B"  # 选项: "2B" 或 "7B"
 model_path_2b: "/home/ma-user/work/lbx/models/Qwen2-VL-2B-Instruct" # 请修改为实际2B模型路径
 model_path_7b: "/home/ma-user/work/lbx/models/Qwen2-VL-7B-Instruct" # 请修改为实际7B模型路径
 # suffix: '_modify_2plus_head_and_layer_gate'
-suffix: 'choose_8_topk'
+suffix: 'choose_0_topk'
 
 # -----------------
 # 尝试一下纯cot
@@ -25,7 +25,7 @@ bf16: True
 # 原本是2,m3cot用的4，后面都用2吧？
 batch_size_training: 2
 
-debug: True
+debug: False
 gradient_accumulation_steps: 8
 num_epochs: 16
 lr: !!float "4e-5"
