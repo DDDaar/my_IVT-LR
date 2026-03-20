@@ -1,0 +1,87 @@
+# =========================
+# Qwen2-VL GRPO Config
+# =========================
+
+run_name: "m3cot_qwen2vl_grpo"
+output_dir: "/home/ma-user/work/lbx/IVT-LR/qwen_vl/output_grpo/m3cot_qwen2vl_grpo"
+
+# Dataset: m3cot or scienceqa
+dataset_name: "m3cot"
+
+# Fixed-seed subset for GRPO debugging/warm-start. Set -1 for full set.
+k_samples: 256
+seed: 42
+num_proc: 1
+
+# Keep latent placeholder style aligned with SFT final stage.
+max_latent_stage: 5
+pad_latent_to_max: true
+
+# Model selection
+model_type: "2B"  # "2B" or "7B"
+model_path_2b: "/home/ma-user/work/lbx/models/Qwen2-VL-2B-Instruct"
+model_path_7b: "/home/ma-user/work/lbx/models/Qwen2-VL-7B-Instruct"
+# NPU compatibility: keep eager attention by default
+attn_implementation: "eager"
+
+# Must point to your previous SFT ckpt:
+# 1) adapter directory (contains adapter_config.json), or
+# 2) fp32 full state dict file, such as epoch_x_full_model_fp32.pth
+sft_ckpt_path: "/home/ma-user/work/lbx/IVT-LR/qwen_vl/output/m3cot_qwen2vl_2B_IVTLRchoose_8_topk/epoch_16_full_model_fp32.pth"
+
+# LoRA switch
+use_lora: true
+lora_r: 64
+lora_alpha: 16
+lora_dropout: 0.05
+lora_bias: "none"
+lora_target_modules:
+  - "q_proj"
+  - "k_proj"
+  - "v_proj"
+  - "o_proj"
+  - "gate_proj"
+  - "up_proj"
+  - "down_proj"
+
+# GRPO optimization
+bf16: true
+gradient_checkpointing: true
+learning_rate: 1.0e-6
+weight_decay: 0.0
+max_grad_norm: 1.0
+warmup_ratio: 0.03
+lr_scheduler_type: "cosine"
+num_train_epochs: 1
+per_device_train_batch_size: 1
+gradient_accumulation_steps: 8
+dataloader_num_workers: 0
+
+# Rollout generation settings
+num_generations: 4
+max_completion_length: 256
+max_prompt_length: null
+# Monkeypatch-based IVTLR sampling controls
+do_sample: true
+temperature: 0.8
+top_k: 50
+top_p: 0.95
+beta: 0.0
+log_completions: true
+
+# ACC reward only
+reward_acc_weight: 1.0
+reward_acc_correct: 1.0
+reward_acc_wrong: -0.2
+reward_acc_missing: -0.4
+
+# Rollout verbose logging (each reward call item)
+verbose_rollout_print: true
+verbose_rollout_max_chars: 300
+verbose_rollout_rank0_only: true
+
+# Logging / checkpointing
+logging_steps: 1
+save_steps: 50
+save_total_limit: 3
+report_to: "none"  # "wandb" or "none"
