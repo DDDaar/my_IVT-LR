@@ -338,6 +338,26 @@ def _make_ivtlr_trl_compatible(ivtlr_model: IVTLR, cfg: Optional[Dict[str, Any]]
         torch.save(self.state_dict(), os.path.join(save_directory, "ivtlr_state_dict.pt"))
 
     ivtlr_model.save_pretrained = MethodType(save_pretrained, ivtlr_model)
+
+    def add_model_tags(self, tags):
+        # TRL may tag models for metadata/logging; keep this a safe no-op fallback.
+        if tags is None:
+            return
+        if hasattr(self.base_causallm, "add_model_tags"):
+            self.base_causallm.add_model_tags(tags)
+            return
+
+        if not hasattr(self, "_model_tags"):
+            self._model_tags = set()
+        if isinstance(tags, str):
+            self._model_tags.add(tags)
+            return
+        try:
+            self._model_tags.update(str(x) for x in tags)
+        except TypeError:
+            self._model_tags.add(str(tags))
+
+    ivtlr_model.add_model_tags = MethodType(add_model_tags, ivtlr_model)
     return ivtlr_model
 
 
@@ -662,10 +682,12 @@ def main():
     model = _make_ivtlr_trl_compatible(model, cfg)
     print("[Init] Using IVTLR model for GRPO training.")
 
+    # Accept legacy key name `ksample` while preferring `k_samples`.
+    k_samples_cfg = cfg.get("k_samples", cfg.get("ksample", 128))
     train_dataset = build_grpo_dataset(
         dataset_name=str(cfg.get("dataset_name", "m3cot")),
         processor=processor,
-        k_samples=int(cfg.get("k_samples", 128)),
+        k_samples=int(k_samples_cfg),
         seed=int(cfg.get("seed", 0)),
         max_latent_stage=int(cfg.get("max_latent_stage", 5)),
         pad_latent_to_max=bool(cfg.get("pad_latent_to_max", True)),

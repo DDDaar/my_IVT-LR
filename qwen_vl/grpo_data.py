@@ -142,17 +142,22 @@ def build_grpo_dataset(
     if dataset_name == "m3cot":
         raw = load_dataset("LightChen2333/M3CoT")["train"]
         raw = raw.filter(_has_image, num_proc=num_proc)
-        raw = raw.map(_prepare_m3cot, num_proc=num_proc)
     elif dataset_name == "scienceqa":
         raw = load_dataset("derek-thomas/ScienceQA")["train"]
         raw = raw.filter(_has_image, num_proc=num_proc)
-        raw = raw.map(_prepare_scienceqa, num_proc=num_proc)
     else:
         raise ValueError(f"Unsupported dataset_name: {dataset_name}")
 
     raw = raw.shuffle(seed=seed)
     if k_samples > 0:
         raw = raw.select(range(min(k_samples, len(raw))))
+
+    # Keep all expensive map steps strictly on the selected subset only.
+    if not pad_latent_to_max:
+        if dataset_name == "m3cot":
+            raw = raw.map(_prepare_m3cot, num_proc=num_proc)
+        elif dataset_name == "scienceqa":
+            raw = raw.map(_prepare_scienceqa, num_proc=num_proc)
 
     if pad_latent_to_max:
         latent_tokens_per_sample = int(max_latent_stage)
