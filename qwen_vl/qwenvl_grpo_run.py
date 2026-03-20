@@ -358,6 +358,32 @@ def _make_ivtlr_trl_compatible(ivtlr_model: IVTLR, cfg: Optional[Dict[str, Any]]
             self._model_tags.add(str(tags))
 
     ivtlr_model.add_model_tags = MethodType(add_model_tags, ivtlr_model)
+
+    def gradient_checkpointing_enable(self, gradient_checkpointing_kwargs=None):
+        kwargs = gradient_checkpointing_kwargs or {}
+        if hasattr(self.base_causallm, "gradient_checkpointing_enable"):
+            self.base_causallm.gradient_checkpointing_enable(
+                gradient_checkpointing_kwargs=kwargs
+            )
+        if hasattr(self.base_causallm, "config"):
+            # Match HF behavior when gradient checkpointing is enabled.
+            self.base_causallm.config.use_cache = False
+
+    def gradient_checkpointing_disable(self):
+        if hasattr(self.base_causallm, "gradient_checkpointing_disable"):
+            self.base_causallm.gradient_checkpointing_disable()
+        if hasattr(self.base_causallm, "config"):
+            self.base_causallm.config.use_cache = True
+
+    ivtlr_model.gradient_checkpointing_enable = MethodType(
+        gradient_checkpointing_enable, ivtlr_model
+    )
+    ivtlr_model.gradient_checkpointing_disable = MethodType(
+        gradient_checkpointing_disable, ivtlr_model
+    )
+    ivtlr_model.supports_gradient_checkpointing = bool(
+        getattr(ivtlr_model.base_causallm, "supports_gradient_checkpointing", True)
+    )
     return ivtlr_model
 
 
