@@ -90,36 +90,68 @@ class IVTLR(nn.Module):
             return first_param.dtype
         return torch.float32
 
-    def _extract_visual_hidden(self, visual_outputs):
-        # HF model variants may return:
-        # - Tensor
-        # - tuple/list with tensor at index 0
-        # - ModelOutput (e.g. BaseModelOutputWithPooling) with last_hidden_state
+    def _normalize_visual_candidate(self, x):
+        if not torch.is_tensor(x):
+            return None
+        if x.dim() == 3:
+            return x.reshape(-1, x.shape[-1])
+        if x.dim() == 2:
+            return x
+        return None
+
+    def _extract_visual_hidden(self, visual_outputs, visual_tower, expected_tokens=None):
+        candidates = []
+
+        def _add_candidate(name, tensor):
+            normalized = self._normalize_visual_candidate(tensor)
+            if normalized is not None:
+                candidates.append((name, normalized))
+
+        # 1) Direct outputs
         if torch.is_tensor(visual_outputs):
-            hidden = visual_outputs
-        elif isinstance(visual_outputs, (tuple, list)) and len(visual_outputs) > 0:
-            if not torch.is_tensor(visual_outputs[0]):
-                raise TypeError(
-                    f"Unsupported visual output tuple head type: {type(visual_outputs[0])}"
-                )
-            hidden = visual_outputs[0]
-        elif hasattr(visual_outputs, "last_hidden_state") and torch.is_tensor(
-            visual_outputs.last_hidden_state
-        ):
-            hidden = visual_outputs.last_hidden_state
+            _add_candidate("tensor", visual_outputs)
+        elif isinstance(visual_outputs, (tuple, list)):
+            for idx, item in enumerate(visual_outputs):
+                _add_candidate(f"tuple[{idx}]", item)
         else:
+            # 2) ModelOutput-like attributes
+            for attr in ("last_hidden_state", "pooler_output", "image_embeds"):
+                if hasattr(visual_outputs, attr):
+                    _add_candidate(attr, getattr(visual_outputs, attr))
+            if hasattr(visual_outputs, "hidden_states") and visual_outputs.hidden_states is not None:
+                hs = visual_outputs.hidden_states
+                if isinstance(hs, (tuple, list)) and len(hs) > 0:
+                    _add_candidate("hidden_states[-1]", hs[-1])
+
+        if len(candidates) == 0:
             raise TypeError(f"Unsupported visual output type: {type(visual_outputs)}")
 
-        # Normalize to [num_visual_tokens, hidden_dim]
-        if hidden.dim() == 3:
-            hidden = hidden.reshape(-1, hidden.shape[-1])
-        elif hidden.dim() != 2:
-            raise ValueError(
-                f"Unexpected visual hidden shape: {tuple(hidden.shape)} (expected 2D/3D)."
-            )
-        return hidden
+        if expected_tokens is None:
+            return candidates[0][1]
 
-    def _run_visual_tower(self, pixel_values, image_grid_thw):
+        # Prefer exact shape match first.
+        for _, cand in candidates:
+            if cand.shape[0] == expected_tokens:
+                return cand
+
+        # Some variants return pre-merger features. Try visual merger if available.
+        if hasattr(visual_tower, "merger"):
+            for _, cand in candidates:
+                try:
+                    merged = visual_tower.merger(cand)
+                    merged = self._normalize_visual_candidate(merged)
+                    if merged is not None and merged.shape[0] == expected_tokens:
+                        return merged
+                except Exception:
+                    continue
+
+        candidate_shapes = [f"{name}:{tuple(t.shape)}" for name, t in candidates]
+        raise ValueError(
+            "Unable to align visual features with expected image tokens. "
+            f"expected_tokens={expected_tokens}, candidates={candidate_shapes}"
+        )
+
+    def _run_visual_tower(self, pixel_values, image_grid_thw, expected_tokens=None):
         visual_tower = self._get_visual_tower()
 
         if image_grid_thw is None:
@@ -138,7 +170,11 @@ class IVTLR(nn.Module):
             except TypeError:
                 visual_outputs = visual_tower(pixel_values, image_grid_thw)
 
-        image_embeds = self._extract_visual_hidden(visual_outputs)
+        image_embeds = self._extract_visual_hidden(
+            visual_outputs=visual_outputs,
+            visual_tower=visual_tower,
+            expected_tokens=expected_tokens,
+        )
         return image_embeds, image_grid_thw
         
         #####################################################################
@@ -310,8 +346,12 @@ class IVTLR(nn.Module):
 
         
         if pixel_values is not None:
-            image_embeds, image_grid_thw = self._run_visual_tower(pixel_values, image_grid_thw)
             n_image_tokens = (input_ids == self.image_token_id).sum().item()
+            image_embeds, image_grid_thw = self._run_visual_tower(
+                pixel_values,
+                image_grid_thw,
+                expected_tokens=n_image_tokens,
+            )
             if n_image_tokens != image_embeds.shape[0]:
                 raise ValueError(
                     "Image features and image tokens do not match: "
