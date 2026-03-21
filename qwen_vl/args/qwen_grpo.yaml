@@ -9,7 +9,7 @@ output_dir: "/home/ma-user/work/lbx/IVT-LR/qwen_vl/output_grpo/m3cot_qwen2vl_grp
 dataset_name: "m3cot"
 
 # Fixed-seed subset for GRPO debugging/warm-start. Set -1 for full set.
-k_samples: 256
+k_samples: 64
 seed: 42
 num_proc: 1
 

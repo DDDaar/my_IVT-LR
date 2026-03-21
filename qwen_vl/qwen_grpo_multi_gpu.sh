@@ -9,6 +9,11 @@ set -euo pipefail
 #   bash qwen_grpo_multi_gpu.sh 8 args/qwen_grpo.yaml 29531
 #   bash qwen_grpo_multi_gpu.sh 8 args/qwen_grpo.yaml 29531 torchrun
 
+find /home/ma-user/.cache/huggingface/datasets/ -type f -name "*of_00032.arrow" -mmin +300 -delete
+export HF_DATASETS_CACHE="/home/ma-user/work/lbx/hf_data_cache"
+find /home/ma-user/work/lbx/hf_data_cache -type f -name "*of_00032.arrow" -mmin +300 -delete
+
+
 NUM_PROCESSES="${1:-auto}"
 CONFIG_PATH="${2:-args/qwen_grpo.yaml}"
 MAIN_PROCESS_PORT="${3:-29531}"
