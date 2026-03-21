@@ -47,7 +47,7 @@ lora_target_modules:
 # GRPO optimization
 bf16: true
 gradient_checkpointing: true
-disable_gc_for_ddp: true
+disable_gc_for_ddp: false
 # Keep aligned with SFT setting in checkpoint name: choose_8_topk
 num_selected_patches: 4
 ddp_find_unused_parameters: false

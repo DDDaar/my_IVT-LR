@@ -34,6 +34,9 @@ except Exception as exc:
         "TRL is required for GRPO. Please install it first, e.g. `pip install trl`."
     ) from exc
 
+import os
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+
 class MemoryMonitorCallback(TrainerCallback):
     def __init__(self, top_n=10, min_mb=10.0):
         """
