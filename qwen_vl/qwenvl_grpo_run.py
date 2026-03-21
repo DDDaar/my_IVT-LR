@@ -1,5 +1,6 @@
 import argparse
 import inspect
+import json
 import os
 import re
 from types import MethodType
@@ -520,6 +521,55 @@ def _align_special_token_ids(model, tokenizer) -> Dict[str, Any]:
     return updates
 
 
+def _is_conversational_prompt(prompt: Any) -> bool:
+    return (
+        isinstance(prompt, list)
+        and len(prompt) > 0
+        and isinstance(prompt[0], dict)
+        and "role" in prompt[0]
+        and "content" in prompt[0]
+    )
+
+
+def _normalize_prompt_to_conversation(prompt: Any) -> List[Dict[str, Any]]:
+    if _is_conversational_prompt(prompt):
+        return prompt
+
+    if isinstance(prompt, str):
+        stripped = prompt.strip()
+        if stripped:
+            try:
+                maybe_obj = json.loads(stripped)
+            except Exception:
+                maybe_obj = None
+            if _is_conversational_prompt(maybe_obj):
+                return maybe_obj
+        return [{"role": "user", "content": prompt}]
+
+    if isinstance(prompt, dict):
+        if "role" in prompt and "content" in prompt:
+            return [prompt]
+        return [{"role": "user", "content": str(prompt)}]
+
+    if isinstance(prompt, list):
+        joined = "\n".join(str(x) for x in prompt)
+        return [{"role": "user", "content": joined}]
+
+    if prompt is None:
+        return [{"role": "user", "content": ""}]
+
+    return [{"role": "user", "content": str(prompt)}]
+
+
+def _grpo_collator(features: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    normalized = []
+    for feature in features:
+        item = dict(feature)
+        item["prompt"] = _normalize_prompt_to_conversation(item.get("prompt"))
+        normalized.append(item)
+    return normalized
+
+
 def _parse_valid_letters(raw_letters: Any) -> Set[str]:
     if raw_letters is None:
         return set()
@@ -741,6 +791,19 @@ def main():
         num_proc=int(cfg.get("num_proc", 1)),
     )
     print(f"[Data] dataset_size={len(train_dataset)}")
+    if len(train_dataset) == 0:
+        raise ValueError("GRPO train_dataset is empty after filtering/selection.")
+    sample_prompt_raw = train_dataset[0].get("prompt")
+    sample_prompt_norm = _normalize_prompt_to_conversation(sample_prompt_raw)
+    print(
+        f"[Data] prompt_sample_type={type(sample_prompt_raw).__name__}, "
+        f"is_conversational={_is_conversational_prompt(sample_prompt_norm)}"
+    )
+    if not _is_conversational_prompt(sample_prompt_norm):
+        raise ValueError(
+            "Prompt format is not conversational after normalization. "
+            "Check dataset preprocessing and cached dataset artifacts."
+        )
 
     reward_funcs = build_reward_functions(cfg)
 
@@ -789,6 +852,8 @@ def main():
         trainer_kwargs["tokenizer"] = tokenizer
 
     trainer = GRPOTrainer(**trainer_kwargs)
+    # Keep a defensive collator so stale/cached prompt strings are normalized per batch.
+    trainer.data_collator = _grpo_collator
     trainer.train()
 
     final_dir = os.path.join(output_dir, "final")

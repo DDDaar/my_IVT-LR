@@ -155,9 +155,9 @@ def build_grpo_dataset(
     # Keep all expensive map steps strictly on the selected subset only.
     if not pad_latent_to_max:
         if dataset_name == "m3cot":
-            raw = raw.map(_prepare_m3cot, num_proc=num_proc)
+            raw = raw.map(_prepare_m3cot, num_proc=num_proc, load_from_cache_file=False)
         elif dataset_name == "scienceqa":
-            raw = raw.map(_prepare_scienceqa, num_proc=num_proc)
+            raw = raw.map(_prepare_scienceqa, num_proc=num_proc, load_from_cache_file=False)
 
     if pad_latent_to_max:
         latent_tokens_per_sample = int(max_latent_stage)
@@ -168,7 +168,12 @@ def build_grpo_dataset(
             dataset_name=dataset_name,
         )
         columns = list(raw.features)
-        return raw.map(mapper, remove_columns=columns, num_proc=num_proc)
+        return raw.map(
+            mapper,
+            remove_columns=columns,
+            num_proc=num_proc,
+            load_from_cache_file=False,
+        )
 
     def dynamic_mapper(example):
         n_latent = min(len(example.get("steps", [])), int(max_latent_stage))
@@ -180,4 +185,9 @@ def build_grpo_dataset(
         )
 
     columns = list(raw.features)
-    return raw.map(dynamic_mapper, remove_columns=columns, num_proc=num_proc)
+    return raw.map(
+        dynamic_mapper,
+        remove_columns=columns,
+        num_proc=num_proc,
+        load_from_cache_file=False,
+    )
