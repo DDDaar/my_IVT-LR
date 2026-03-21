@@ -235,6 +235,24 @@ class IVTLR(nn.Module):
         **kwargs
     ):
 
+        
+        
+        
+                # 方案 2：兼容性检测写法
+        if hasattr(self.base_causallm, 'visual'):
+            v_dtype = self.base_causallm.visual.get_dtype()
+            print('self.base_causallm.visual')
+        elif hasattr(self.base_causallm, 'model') and hasattr(self.base_causallm.model, 'visual'):
+            v_dtype = self.base_causallm.model.visual.get_dtype()
+            print('self.base_causallm.model.visual')
+        else:
+            v_dtype = next(self.base_causallm.parameters()).dtype
+            print(f'前面都不对，print(f"DEBUG: Model attributes: {dir(self.base_causallm)}")')
+
+        
+        
+        
+        
         B, S = input_ids.size()
 
         # decode

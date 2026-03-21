@@ -30,7 +30,7 @@ attn_implementation: "eager"
 sft_ckpt_path: "/home/ma-user/work/lbx/IVT-LR/qwen_vl/output/m3cot_qwen2vl_2B_IVTLRchoose_8_topk/epoch_16_full_model_fp32.pth"
 
 # LoRA switch
-use_lora: true
+use_lora: false
 lora_r: 64
 lora_alpha: 16
 lora_dropout: 0.05
