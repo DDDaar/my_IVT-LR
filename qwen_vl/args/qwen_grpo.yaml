@@ -22,7 +22,7 @@ model_type: "2B"  # "2B" or "7B"
 model_path_2b: "/home/ma-user/work/lbx/models/Qwen2-VL-2B-Instruct"
 model_path_7b: "/home/ma-user/work/lbx/models/Qwen2-VL-7B-Instruct"
 # NPU compatibility: keep eager attention by default
-attn_implementation: "eager"
+attn_implementation: "sdpa"
 
 # Must point to your previous SFT ckpt:
 # 1) adapter directory (contains adapter_config.json), or

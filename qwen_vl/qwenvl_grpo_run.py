@@ -16,6 +16,9 @@ from grpo_data import build_grpo_dataset
 from qwen_ivtlr import IVTLR
 from utils import set_seed
 
+import gc
+from transformers import TrainerCallback
+
 try:
     import torch_npu  # noqa: F401
     from torch_npu.contrib import transfer_to_npu  # noqa: F401
@@ -30,6 +33,63 @@ except Exception as exc:
     raise ImportError(
         "TRL is required for GRPO. Please install it first, e.g. `pip install trl`."
     ) from exc
+
+class MemoryMonitorCallback(TrainerCallback):
+    def __init__(self, top_n=10, min_mb=10.0):
+        """
+        :param top_n: 打印占用显存最大的前 N 个张量
+        :param min_mb: 过滤掉小于 min_mb MB 的小张量，避免输出过多
+        """
+        self.top_n = top_n
+        self.min_mb = min_mb
+
+    def on_step_begin(self, args, state, control, **kwargs):
+        # 在每个 Step 开始时重置峰值显存统计
+        if torch.cuda.is_available():
+            torch.cuda.reset_peak_memory_stats()
+
+    def on_step_end(self, args, state, control, **kwargs):
+        if not torch.cuda.is_available():
+            return
+        
+        device = torch.cuda.current_device()
+        allocated = torch.cuda.memory_allocated(device) / (1024 ** 3)
+        reserved = torch.cuda.memory_reserved(device) / (1024 ** 3)
+        peak_allocated = torch.cuda.max_memory_allocated(device) / (1024 ** 3)
+        
+        print(f"\n[{'='*20} STEP {state.global_step} MEMORY REPORT {'='*20}]")
+        print(f"Current Allocated (当前已分配): {allocated:.3f} GB")
+        print(f"Current Reserved  (当前已缓存): {reserved:.3f} GB")
+        print(f"Peak Allocated    (本步峰值):   {peak_allocated:.3f} GB")
+        
+        # 使用 gc 模块扫描当前驻留在内存中的所有 Tensor
+        tensors = []
+        for obj in gc.get_objects():
+            try:
+                if torch.is_tensor(obj) or (hasattr(obj, 'data') and torch.is_tensor(obj.data)):
+                    # 跳过没有挂载在当前 GPU 上的张量
+                    if obj.device.type != 'cuda':
+                        continue
+                    
+                    # 计算占用显存大小 (MB)
+                    size_mb = obj.element_size() * obj.nelement() / (1024 ** 2)
+                    if size_mb > self.min_mb:
+                        tensors.append({
+                            'size': tuple(obj.size()),
+                            'dtype': str(obj.dtype).split('.')[-1],
+                            'memory_mb': size_mb
+                        })
+            except Exception:
+                pass
+        
+        # 按占用显存大小降序排序
+        tensors.sort(key=lambda x: x['memory_mb'], reverse=True)
+        
+        print(f"--- Top {self.top_n} Largest Tensors in Memory ---")
+        for i, t_info in enumerate(tensors[:self.top_n]):
+            print(f"  {i+1}. Size: {t_info['size']}, Type: {t_info['dtype']}, Memory: {t_info['memory_mb']:.2f} MB")
+        print("=" * 64 + "\n")
+
 
 
 def _build_ivtlr_wrapper(
@@ -1029,6 +1089,7 @@ def main():
         "beta": float(cfg.get("beta", 0.0)),
         "dataloader_num_workers": int(cfg.get("dataloader_num_workers", 0)),
         "log_completions": bool(cfg.get("log_completions", True)),
+        "save_safetensors": False,  # <==== 请在这里增加这一行
     }
     if cfg.get("warmup_steps", None) is not None:
         grpo_kwargs["warmup_steps"] = int(cfg.get("warmup_steps"))
@@ -1037,12 +1098,21 @@ def main():
 
     grpo_cfg = GRPOConfig(**_to_supported_kwargs(GRPOConfig, grpo_kwargs))
 
+    # trainer_kwargs = {
+    #     "model": model,
+    #     "reward_funcs": reward_funcs,
+    #     "args": grpo_cfg,
+    #     "train_dataset": train_dataset,
+    # }
+
     trainer_kwargs = {
-        "model": model,
-        "reward_funcs": reward_funcs,
-        "args": grpo_cfg,
-        "train_dataset": train_dataset,
-    }
+            "model": model,
+            "reward_funcs": reward_funcs,
+            "args": grpo_cfg,
+            "train_dataset": train_dataset,
+            "callbacks": [MemoryMonitorCallback(top_n=15)]  # <--- 在这里添加回调
+        }
+    
     trainer_init_sig = inspect.signature(GRPOTrainer.__init__)
     if "processing_class" in trainer_init_sig.parameters:
         trainer_kwargs["processing_class"] = processor
