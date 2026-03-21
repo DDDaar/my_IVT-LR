@@ -330,6 +330,7 @@ def _make_ivtlr_trl_compatible(ivtlr_model: IVTLR, cfg: Optional[Dict[str, Any]]
         pv_i = pv[row_start:row_end]
         return pv_i, igt_i
 
+
     def trl_generate(self, input_ids=None, attention_mask=None, pixel_values=None, image_grid_thw=None, **kwargs):
         if input_ids is None:
             raise ValueError("input_ids is required for IVTLR generation.")
