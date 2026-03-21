@@ -89,6 +89,57 @@ class IVTLR(nn.Module):
         if first_param is not None:
             return first_param.dtype
         return torch.float32
+
+    def _extract_visual_hidden(self, visual_outputs):
+        # HF model variants may return:
+        # - Tensor
+        # - tuple/list with tensor at index 0
+        # - ModelOutput (e.g. BaseModelOutputWithPooling) with last_hidden_state
+        if torch.is_tensor(visual_outputs):
+            hidden = visual_outputs
+        elif isinstance(visual_outputs, (tuple, list)) and len(visual_outputs) > 0:
+            if not torch.is_tensor(visual_outputs[0]):
+                raise TypeError(
+                    f"Unsupported visual output tuple head type: {type(visual_outputs[0])}"
+                )
+            hidden = visual_outputs[0]
+        elif hasattr(visual_outputs, "last_hidden_state") and torch.is_tensor(
+            visual_outputs.last_hidden_state
+        ):
+            hidden = visual_outputs.last_hidden_state
+        else:
+            raise TypeError(f"Unsupported visual output type: {type(visual_outputs)}")
+
+        # Normalize to [num_visual_tokens, hidden_dim]
+        if hidden.dim() == 3:
+            hidden = hidden.reshape(-1, hidden.shape[-1])
+        elif hidden.dim() != 2:
+            raise ValueError(
+                f"Unexpected visual hidden shape: {tuple(hidden.shape)} (expected 2D/3D)."
+            )
+        return hidden
+
+    def _run_visual_tower(self, pixel_values, image_grid_thw):
+        visual_tower = self._get_visual_tower()
+
+        if image_grid_thw is None:
+            raise ValueError("image_grid_thw is required when pixel_values is provided.")
+        if image_grid_thw.dim() == 1:
+            image_grid_thw = image_grid_thw.unsqueeze(0)
+
+        pixel_values = pixel_values.to(self._get_visual_dtype())
+
+        # Compatible call styles across Qwen2-VL implementations.
+        try:
+            visual_outputs = visual_tower(pixel_values, grid_thw=image_grid_thw)
+        except TypeError:
+            try:
+                visual_outputs = visual_tower(pixel_values, image_grid_thw=image_grid_thw)
+            except TypeError:
+                visual_outputs = visual_tower(pixel_values, image_grid_thw)
+
+        image_embeds = self._extract_visual_hidden(visual_outputs)
+        return image_embeds, image_grid_thw
         
         #####################################################################
         # #增加全连接层进行注意力的融合，而不是简单平均各个head
@@ -234,25 +285,6 @@ class IVTLR(nn.Module):
         image_grid_thw: torch.Tensor = None,
         **kwargs
     ):
-
-        
-        
-        
-                # 方案 2：兼容性检测写法
-        if hasattr(self.base_causallm, 'visual'):
-            v_dtype = self.base_causallm.visual.get_dtype()
-            print('self.base_causallm.visual')
-        elif hasattr(self.base_causallm, 'model') and hasattr(self.base_causallm.model, 'visual'):
-            v_dtype = self.base_causallm.model.visual.get_dtype()
-            print('self.base_causallm.model.visual')
-        else:
-            v_dtype = next(self.base_causallm.parameters()).dtype
-            print(f'前面都不对，print(f"DEBUG: Model attributes: {dir(self.base_causallm)}")')
-
-        
-        
-        
-        
         B, S = input_ids.size()
 
         # decode
@@ -278,13 +310,14 @@ class IVTLR(nn.Module):
 
         
         if pixel_values is not None:
-            visual_tower = self._get_visual_tower()
-            pixel_values = pixel_values.type(self._get_visual_dtype())
-            image_embeds = visual_tower(pixel_values, grid_thw=image_grid_thw)
+            image_embeds, image_grid_thw = self._run_visual_tower(pixel_values, image_grid_thw)
             n_image_tokens = (input_ids == self.image_token_id).sum().item()
             if n_image_tokens != image_embeds.shape[0]:
                 raise ValueError(
-                    f"Image features and image tokens do not match: tokens: {n_image_tokens}, features {image_embeds.shape[0]}"
+                    "Image features and image tokens do not match: "
+                    f"tokens={n_image_tokens}, features={image_embeds.shape[0]}, "
+                    f"pixel_values_shape={tuple(pixel_values.shape)}, "
+                    f"image_grid_thw_shape={tuple(image_grid_thw.shape)}"
                 )
             # 图像部分掩码
             image_mask_init = (input_ids == self.image_token_id)  # (B, orig_S)
@@ -1066,4 +1099,3 @@ class IVTLR(nn.Module):
             return torch.tensor(tokens).view(1, -1), current_inputs_embeds
         else:
             return torch.tensor(tokens).view(1, -1)
-
