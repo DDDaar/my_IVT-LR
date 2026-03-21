@@ -64,6 +64,31 @@ class IVTLR(nn.Module):
             
         self.processor = AutoProcessor.from_pretrained(model_path)
         # self.processor = ChameleonProcessor.from_pretrained("facebook/chameleon-7b")
+
+    def _get_visual_tower(self):
+        # Compatible with both layouts:
+        # 1) base_causallm.visual
+        # 2) base_causallm.model.visual
+        if hasattr(self.base_causallm, "visual"):
+            return self.base_causallm.visual
+
+        inner_model = getattr(self.base_causallm, "model", None)
+        if inner_model is not None and hasattr(inner_model, "visual"):
+            return inner_model.visual
+
+        raise AttributeError(
+            "Cannot find vision tower on base_causallm. "
+            "Tried `base_causallm.visual` and `base_causallm.model.visual`."
+        )
+
+    def _get_visual_dtype(self):
+        visual_tower = self._get_visual_tower()
+        if hasattr(visual_tower, "get_dtype"):
+            return visual_tower.get_dtype()
+        first_param = next(visual_tower.parameters(), None)
+        if first_param is not None:
+            return first_param.dtype
+        return torch.float32
         
         #####################################################################
         # #增加全连接层进行注意力的融合，而不是简单平均各个head
@@ -235,8 +260,9 @@ class IVTLR(nn.Module):
 
         
         if pixel_values is not None:
-            pixel_values = pixel_values.type(self.base_causallm.visual.get_dtype())
-            image_embeds = self.base_causallm.visual(pixel_values, grid_thw=image_grid_thw)
+            visual_tower = self._get_visual_tower()
+            pixel_values = pixel_values.type(self._get_visual_dtype())
+            image_embeds = visual_tower(pixel_values, grid_thw=image_grid_thw)
             n_image_tokens = (input_ids == self.image_token_id).sum().item()
             if n_image_tokens != image_embeds.shape[0]:
                 raise ValueError(
@@ -1022,5 +1048,4 @@ class IVTLR(nn.Module):
             return torch.tensor(tokens).view(1, -1), current_inputs_embeds
         else:
             return torch.tensor(tokens).view(1, -1)
-
 
