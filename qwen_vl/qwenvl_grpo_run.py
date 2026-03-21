@@ -366,6 +366,11 @@ def _make_ivtlr_trl_compatible(ivtlr_model: IVTLR, cfg: Optional[Dict[str, Any]]
             self.base_causallm.gradient_checkpointing_enable(
                 gradient_checkpointing_kwargs=kwargs
             )
+            self.is_gradient_checkpointing = bool(
+                getattr(self.base_causallm, "is_gradient_checkpointing", True)
+            )
+        else:
+            self.is_gradient_checkpointing = True
         if hasattr(self.base_causallm, "config"):
             # Match HF behavior when gradient checkpointing is enabled.
             self.base_causallm.config.use_cache = False
@@ -373,6 +378,11 @@ def _make_ivtlr_trl_compatible(ivtlr_model: IVTLR, cfg: Optional[Dict[str, Any]]
     def gradient_checkpointing_disable(self):
         if hasattr(self.base_causallm, "gradient_checkpointing_disable"):
             self.base_causallm.gradient_checkpointing_disable()
+            self.is_gradient_checkpointing = bool(
+                getattr(self.base_causallm, "is_gradient_checkpointing", False)
+            )
+        else:
+            self.is_gradient_checkpointing = False
         if hasattr(self.base_causallm, "config"):
             self.base_causallm.config.use_cache = True
 
@@ -384,6 +394,10 @@ def _make_ivtlr_trl_compatible(ivtlr_model: IVTLR, cfg: Optional[Dict[str, Any]]
     )
     ivtlr_model.supports_gradient_checkpointing = bool(
         getattr(ivtlr_model.base_causallm, "supports_gradient_checkpointing", True)
+    )
+    # TRL unwrap_model_for_generation reads this attribute directly.
+    ivtlr_model.is_gradient_checkpointing = bool(
+        getattr(ivtlr_model.base_causallm, "is_gradient_checkpointing", False)
     )
     return ivtlr_model
 
