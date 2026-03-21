@@ -3,6 +3,7 @@ import inspect
 import json
 import os
 import re
+from itertools import accumulate
 from types import MethodType
 from typing import Any, Dict, List, Optional, Set
 
@@ -262,6 +263,63 @@ def _make_ivtlr_trl_compatible(ivtlr_model: IVTLR, cfg: Optional[Dict[str, Any]]
 
         return torch.tensor(tokens, device=input_ids.device).view(1, -1)
 
+    def _to_int_list(x):
+        if x is None:
+            return None
+        if torch.is_tensor(x):
+            return [int(v) for v in x.detach().cpu().tolist()]
+        if isinstance(x, (list, tuple)):
+            return [int(v) for v in x]
+        return [int(x)]
+
+    def _slice_mm_for_sample(
+        pv: Optional[torch.Tensor],
+        igt: Optional[torch.Tensor],
+        num_images: Optional[List[int]],
+        sample_idx: int,
+        batch_size: int,
+    ):
+        if pv is None and igt is None:
+            return None, None
+
+        if igt is None:
+            # Non-Qwen multimodal layout fallback: assume batch-first.
+            return (pv[sample_idx : sample_idx + 1] if pv is not None else None), None
+
+        # Typical Qwen2-VL layout from processor:
+        # - image_grid_thw: [num_images_total, 3]
+        # - pixel_values: [sum(prod(grid_thw_i)), feature_dim]
+        rows_per_image = (igt.prod(dim=-1)).detach().cpu().tolist()
+        num_images_list = num_images
+        if num_images_list is None:
+            # Default assumption: one image per sample.
+            num_images_list = [1] * batch_size
+
+        if len(num_images_list) != batch_size:
+            raise ValueError(
+                f"Invalid num_images length: {len(num_images_list)} (expected {batch_size})."
+            )
+        if sum(num_images_list) != int(igt.shape[0]):
+            raise ValueError(
+                f"Mismatch between num_images ({sum(num_images_list)}) and image_grid_thw rows ({igt.shape[0]})."
+            )
+
+        img_bounds = [0, *accumulate(num_images_list)]
+        img_start, img_end = img_bounds[sample_idx], img_bounds[sample_idx + 1]
+        igt_i = igt[img_start:img_end]
+
+        if pv is None:
+            return None, igt_i
+
+        if pv.shape[0] == batch_size:
+            # Batch-first tensor fallback.
+            return pv[sample_idx : sample_idx + 1], igt_i
+
+        row_bounds = [0, *accumulate(rows_per_image)]
+        row_start, row_end = row_bounds[img_start], row_bounds[img_end]
+        pv_i = pv[row_start:row_end]
+        return pv_i, igt_i
+
     def trl_generate(self, input_ids=None, attention_mask=None, pixel_values=None, image_grid_thw=None, **kwargs):
         if input_ids is None:
             raise ValueError("input_ids is required for IVTLR generation.")
@@ -274,6 +332,7 @@ def _make_ivtlr_trl_compatible(ivtlr_model: IVTLR, cfg: Optional[Dict[str, Any]]
         top_k = int(kwargs.get("top_k", gen_defaults["top_k"]))
         top_p = float(kwargs.get("top_p", gen_defaults["top_p"]))
         max_new_tokens = int(kwargs.get("max_new_tokens", kwargs.get("max_completion_length", 16)))
+        num_images = _to_int_list(kwargs.get("num_images"))
 
         # Native IVTLR.generate only supports batch_size == 1.
         # For GRPO rollouts, run per-sample and pad to a common length.
@@ -294,8 +353,13 @@ def _make_ivtlr_trl_compatible(ivtlr_model: IVTLR, cfg: Optional[Dict[str, Any]]
 
         single_outputs = []
         for i in range(input_ids.shape[0]):
-            pv = pixel_values[i : i + 1] if pixel_values is not None else None
-            igt = image_grid_thw[i : i + 1] if image_grid_thw is not None else None
+            pv, igt = _slice_mm_for_sample(
+                pv=pixel_values,
+                igt=image_grid_thw,
+                num_images=num_images,
+                sample_idx=i,
+                batch_size=input_ids.shape[0],
+            )
             out_i = _generate_one(
                 self,
                 input_ids=input_ids[i : i + 1],
