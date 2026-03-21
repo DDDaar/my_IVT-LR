@@ -32,7 +32,7 @@ class IVTLR(nn.Module):
         image_token_id,
         visual_start_id,
         visual_end_id,
-        num_selected_patches: int = 0,
+        num_selected_patches: int = 8,
         model_path: str = None,  # [新增参数]
     ):
 
@@ -62,7 +62,7 @@ class IVTLR(nn.Module):
             print('no model path!!!')
             time.sleep(1000)
             
-        self.processor = AutoProcessor.from_pretrained(model_path)
+        self.processor = AutoProcessor.from_pretrained(model_path, use_fast=False)
         # self.processor = ChameleonProcessor.from_pretrained("facebook/chameleon-7b")
 
     def _get_visual_tower(self):
@@ -414,8 +414,6 @@ class IVTLR(nn.Module):
                         inputs_embeds=inputs_embeds[:, start:end, :],  # (B, end, D)
                         attention_mask=attention_mask[:, start:end],
                         position_ids=position_ids[:, start:end],
-                        pixel_values=pixel_values,
-                        image_grid_thw=image_grid_thw,
                         output_hidden_states=True,
                         output_attentions=True,
                         use_cache=True,
@@ -425,8 +423,6 @@ class IVTLR(nn.Module):
                         inputs_embeds=inputs_embeds[:, start:end, :],
                         attention_mask=attention_mask[:, :end],
                         position_ids=position_ids[:, start:end],
-                        pixel_values=pixel_values,
-                        image_grid_thw=image_grid_thw,
                         output_hidden_states=True,
                         output_attentions=True,
                         use_cache=True,
@@ -940,8 +936,6 @@ class IVTLR(nn.Module):
                     inputs_embeds=inputs_embeds[:, :end, :],
                     attention_mask=attention_mask[:, :end],
                     position_ids=position_ids[:, :end],
-                    pixel_values=pixel_values,
-                    image_grid_thw=image_grid_thw,
                     output_hidden_states=True,
                     output_attentions=False,
                 )
@@ -950,8 +944,6 @@ class IVTLR(nn.Module):
                     inputs_embeds=inputs_embeds[:, :end, :],
                     attention_mask=attention_mask[:, :end],
                     position_ids=position_ids[:, :end],
-                    pixel_values=pixel_values,
-                    image_grid_thw=image_grid_thw,
                     output_hidden_states=True,
                     output_attentions=False,
                 )
@@ -1108,8 +1100,6 @@ class IVTLR(nn.Module):
                 inputs_embeds=inputs_embeds_for_forward,
                 attention_mask=attention_mask_for_forward,
                 position_ids=position_ids,
-                pixel_values=pixel_values if past_key_values is None else None, 
-                image_grid_thw=image_grid_thw if past_key_values is None else None,
                 past_key_values=past_key_values,
                 use_cache=True
             )

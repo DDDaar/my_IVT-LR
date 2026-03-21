@@ -12,7 +12,7 @@ set -euo pipefail
 find /home/ma-user/.cache/huggingface/datasets/ -type f -name "*of_00032.arrow" -mmin +300 -delete
 export HF_DATASETS_CACHE="/home/ma-user/work/lbx/hf_data_cache"
 find /home/ma-user/work/lbx/hf_data_cache -type f -name "*of_00032.arrow" -mmin +300 -delete
-
+export WANDB_API_KEY=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
 
 NUM_PROCESSES="${1:-auto}"
 CONFIG_PATH="${2:-args/qwen_grpo.yaml}"
@@ -20,7 +20,7 @@ MAIN_PROCESS_PORT="${3:-29531}"
 LAUNCHER="${4:-auto}"   # auto | accelerate | torchrun
 LOG_FILE="${LOG_FILE:-grpo_train_multi_gpu.log}"
 
-# Optional environment hints:
+# Optional environment hints:a
 #   CUDA:   export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
 #   ASCEND: export ASCEND_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
 #           export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7

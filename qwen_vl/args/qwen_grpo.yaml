@@ -30,7 +30,7 @@ attn_implementation: "eager"
 sft_ckpt_path: "/home/ma-user/work/lbx/IVT-LR/qwen_vl/output/m3cot_qwen2vl_2B_IVTLRchoose_8_topk/epoch_16_full_model_fp32.pth"
 
 # LoRA switch
-use_lora: false
+use_lora: true
 lora_r: 64
 lora_alpha: 16
 lora_dropout: 0.05
@@ -47,10 +47,17 @@ lora_target_modules:
 # GRPO optimization
 bf16: true
 gradient_checkpointing: true
+disable_gc_for_ddp: true
+# Keep aligned with SFT setting in checkpoint name: choose_8_topk
+num_selected_patches: 8
+ddp_find_unused_parameters: false
+ddp_broadcast_buffers: false
+min_ckpt_match_ratio: 0.30
 learning_rate: 1.0e-6
 weight_decay: 0.0
 max_grad_norm: 1.0
 warmup_ratio: 0.03
+warmup_steps: 0
 lr_scheduler_type: "cosine"
 num_train_epochs: 1
 per_device_train_batch_size: 1
@@ -60,6 +67,7 @@ dataloader_num_workers: 0
 # Rollout generation settings
 num_generations: 4
 max_completion_length: 256
+min_completion_length: 1
 max_prompt_length: null
 # Monkeypatch-based IVTLR sampling controls
 do_sample: true

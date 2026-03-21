@@ -32,7 +32,9 @@ except Exception as exc:
     ) from exc
 
 
-def _build_ivtlr_wrapper(model, tokenizer, processor, model_path: str):
+def _build_ivtlr_wrapper(
+    model, tokenizer, processor, model_path: str, cfg: Optional[Dict[str, Any]] = None
+):
     latent_id = tokenizer.convert_tokens_to_ids("<|latent|>")
     start_id = tokenizer.convert_tokens_to_ids("<|start-latent|>")
     end_id = tokenizer.convert_tokens_to_ids("<|end-latent|>")
@@ -40,6 +42,15 @@ def _build_ivtlr_wrapper(model, tokenizer, processor, model_path: str):
     image_token_id = tokenizer.convert_tokens_to_ids(image_token)
     visual_start_id = tokenizer.convert_tokens_to_ids("<|vision_start|>")
     visual_end_id = tokenizer.convert_tokens_to_ids("<|vision_end|>")
+
+    cfg = cfg or {}
+    num_selected_patches = int(cfg.get("num_selected_patches", 1))
+    if num_selected_patches <= 0:
+        print(
+            f"[Init] Invalid num_selected_patches={num_selected_patches}; "
+            "fallback to 1."
+        )
+        num_selected_patches = 1
 
     return IVTLR(
         base_causallm=model,
@@ -50,6 +61,7 @@ def _build_ivtlr_wrapper(model, tokenizer, processor, model_path: str):
         image_token_id=image_token_id,
         visual_start_id=visual_start_id,
         visual_end_id=visual_end_id,
+        num_selected_patches=num_selected_patches,
         model_path=model_path,
     )
 
@@ -234,8 +246,6 @@ def _make_ivtlr_trl_compatible(ivtlr_model: IVTLR, cfg: Optional[Dict[str, Any]]
                 inputs_embeds=inputs_embeds_for_forward,
                 attention_mask=attention_mask_for_forward,
                 position_ids=position_ids,
-                pixel_values=pixel_values if past_key_values is None else None,
-                image_grid_thw=image_grid_thw if past_key_values is None else None,
                 past_key_values=past_key_values,
                 use_cache=True,
             )
@@ -503,40 +513,64 @@ def _extract_state_dict(payload: Any) -> Dict[str, torch.Tensor]:
     return payload
 
 
-def _candidate_key_variants(key: str) -> List[str]:
-    variants = set()
-    variants.add(key)
-    if key.startswith("module."):
-        variants.add(key[len("module.") :])
-    else:
-        variants.add("module." + key)
+def _load_checkpoint_payload(ckpt_path: str, cfg: Dict[str, Any]) -> Any:
+    """
+    Load checkpoint in a memory-friendlier way when possible.
+    Defaults align with large fp32 .pth files used by SFT.
+    """
+    load_kwargs: Dict[str, Any] = {"map_location": "cpu"}
+    use_weights_only = cfg.get("ckpt_weights_only", True)
+    use_mmap = cfg.get("ckpt_mmap", True)
+    if use_weights_only is not None:
+        load_kwargs["weights_only"] = bool(use_weights_only)
+    if use_mmap is not None:
+        load_kwargs["mmap"] = bool(use_mmap)
 
-    expanded = set()
-    for k in variants:
-        expanded.add(k)
-        if not k.startswith("base_causallm."):
-            expanded.add("base_causallm." + k)
-    return list(expanded)
+    try:
+        return torch.load(ckpt_path, **load_kwargs)
+    except TypeError:
+        # Some patched runtimes may not expose mmap/weights_only kwargs.
+        print(
+            "[CKPT] torch.load does not support mmap/weights_only in this runtime; "
+            "fallback to map_location=cpu."
+        )
+        return torch.load(ckpt_path, map_location="cpu")
+    except Exception as exc:
+        if load_kwargs.get("weights_only", None) is True:
+            # Retry for checkpoints that contain pickled non-weight metadata.
+            retry_kwargs = dict(load_kwargs)
+            retry_kwargs["weights_only"] = False
+            print(
+                f"[CKPT] weights_only=True load failed ({exc}); "
+                "retrying with weights_only=False."
+            )
+            return torch.load(ckpt_path, **retry_kwargs)
+        raise
 
 
-def _remap_state_dict_keys(
-    source_sd: Dict[str, torch.Tensor], target_keys: Set[str]
-) -> Dict[str, torch.Tensor]:
-    remapped = {}
-    for key, value in source_sd.items():
-        matched = None
-        for cand in _candidate_key_variants(key):
-            if cand in target_keys:
-                matched = cand
-                break
-        if matched is not None:
-            remapped[matched] = value
-    return remapped
+def _strip_module_prefix(state_dict: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+    if any(k.startswith("module.") for k in state_dict.keys()):
+        print("[CKPT] Stripping 'module.' prefix from checkpoint keys.")
+        return {
+            (k[len("module.") :] if k.startswith("module.") else k): v
+            for k, v in state_dict.items()
+        }
+    return state_dict
+
+
+def _checkpoint_has_lora_keys(state_dict: Dict[str, torch.Tensor]) -> bool:
+    return any(("lora_" in k) or (".base_layer." in k) for k in state_dict.keys())
 
 
 def _load_sft_checkpoint_into_model(
     model, tokenizer, processor, cfg: Dict[str, Any], model_path: str
 ):
+    """
+    Keep GRPO checkpoint loading behavior aligned with infer.py:
+    - torch.load(map_location='cpu')
+    - strip `module.` prefix when present
+    - direct strict state_dict load into IVTLR wrapper
+    """
     ckpt_path = cfg.get("sft_ckpt_path", "")
     if not ckpt_path:
         raise ValueError("sft_ckpt_path is required for GRPO fine-tuning in this workflow.")
@@ -549,28 +583,33 @@ def _load_sft_checkpoint_into_model(
         if isinstance(model, PeftModel):
             model.load_adapter(ckpt_path, adapter_name="sft", is_trainable=True)
             model.set_adapter("sft")
-            return _build_ivtlr_wrapper(model, tokenizer, processor, model_path)
+            return _build_ivtlr_wrapper(model, tokenizer, processor, model_path, cfg=cfg)
         peft_model = PeftModel.from_pretrained(model, ckpt_path, is_trainable=True)
-        return _build_ivtlr_wrapper(peft_model, tokenizer, processor, model_path)
+        return _build_ivtlr_wrapper(peft_model, tokenizer, processor, model_path, cfg=cfg)
 
     # Full fp32 state dict from SFT (e.g. epoch_x_full_model_fp32.pth).
     print(f"[CKPT] Loading full SFT state dict from: {ckpt_path}")
-    payload = torch.load(ckpt_path, map_location="cpu")
-    source_sd = _extract_state_dict(payload)
+    payload = _load_checkpoint_payload(ckpt_path, cfg)
+    source_sd = _strip_module_prefix(_extract_state_dict(payload))
+    del payload
 
-    ivtlr_wrapper = _build_ivtlr_wrapper(model, tokenizer, processor, model_path)
-
-    target_keys = set(ivtlr_wrapper.state_dict().keys())
-    remapped = _remap_state_dict_keys(source_sd, target_keys)
-    if len(remapped) == 0:
-        raise RuntimeError(
-            "No parameters were matched while loading SFT checkpoint. "
-            "Please verify the checkpoint source and model architecture."
+    # If checkpoint carries LoRA/base_layer params, ensure model structure matches.
+    has_lora = _checkpoint_has_lora_keys(source_sd)
+    if has_lora and not isinstance(model, PeftModel):
+        print(
+            "[CKPT] Detected LoRA/base_layer keys in checkpoint; "
+            "wrapping base model with PEFT before strict load."
         )
-    incompatible = ivtlr_wrapper.load_state_dict(remapped, strict=False)
+        model = get_peft_model(model, _build_lora_config(cfg))
+
+    ivtlr_wrapper = _build_ivtlr_wrapper(model, tokenizer, processor, model_path, cfg=cfg)
+
+    # infer.py-style strict load.
+    incompatible = ivtlr_wrapper.load_state_dict(source_sd, strict=True)
     print(
-        f"[CKPT] Loaded state dict with remapping: "
-        f"loaded={len(remapped)}, missing={len(incompatible.missing_keys)}, "
+        "[CKPT] Strict load succeeded: "
+        f"source_keys={len(source_sd)}, "
+        f"missing={len(incompatible.missing_keys)}, "
         f"unexpected={len(incompatible.unexpected_keys)}"
     )
     return ivtlr_wrapper
@@ -712,6 +751,8 @@ def build_reward_functions(cfg: Dict[str, Any]):
     verbose_rollout = bool(cfg.get("verbose_rollout_print", False))
     verbose_max_chars = int(cfg.get("verbose_rollout_max_chars", 300))
     print_only_rank0 = bool(cfg.get("verbose_rollout_rank0_only", True))
+    verbose_dump_on_missing = bool(cfg.get("verbose_rollout_dump_on_missing", True))
+    verbose_dump_raw_completion = bool(cfg.get("verbose_rollout_dump_raw_completion", True))
 
     def _should_print():
         if not verbose_rollout:
@@ -791,6 +832,17 @@ def build_reward_functions(cfg: Dict[str, Any]):
                         f" reward={reward:.4f}"
                     )
                 print(f"[ROLLOUT_COMPLETION] { _truncate(text) }")
+                if pred is None and verbose_dump_on_missing:
+                    print(
+                        "[ROLLOUT_DEBUG]"
+                        f" idx={i}"
+                        f" completion_type={type(completion).__name__}"
+                        f" gt={gt_letter}"
+                        f" valid_letters={sorted(valid) if valid else 'ALL'}"
+                    )
+                    print(f"[ROLLOUT_TEXT_REPR] { _truncate(repr(text)) }")
+                    if verbose_dump_raw_completion:
+                        print(f"[ROLLOUT_RAW_COMPLETION] { _truncate(repr(completion)) }")
         return rewards
 
     return [accuracy_reward]
@@ -836,7 +888,7 @@ def main():
     tokenizer.add_tokens("<|end-latent|>")
     tokenizer.add_tokens("<|latent|>")
 
-    processor = AutoProcessor.from_pretrained(model_path, tokenizer=tokenizer)
+    processor = AutoProcessor.from_pretrained(model_path, tokenizer=tokenizer, use_fast=False)
     if hasattr(processor, "tokenizer"):
         processor.tokenizer.pad_token = tokenizer.pad_token
         processor.tokenizer.padding_side = tokenizer.padding_side
@@ -845,7 +897,21 @@ def main():
     token_id_updates = _align_special_token_ids(model, tokenizer)
     if token_id_updates:
         print(f"[Init] Aligned model token ids with tokenizer: {token_id_updates}")
-    if bool(cfg.get("gradient_checkpointing", True)):
+
+    world_size = int(os.environ.get("WORLD_SIZE", "1"))
+    gradient_checkpointing_enabled = bool(cfg.get("gradient_checkpointing", True))
+    if (
+        world_size > 1
+        and gradient_checkpointing_enabled
+        and bool(cfg.get("disable_gc_for_ddp", True))
+    ):
+        print(
+            "[Init] disable_gc_for_ddp=True and WORLD_SIZE>1; "
+            "disabling gradient checkpointing to avoid DDP autograd-hook conflicts."
+        )
+        gradient_checkpointing_enabled = False
+
+    if gradient_checkpointing_enabled:
         model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
 
     if bool(cfg.get("use_lora", True)):
@@ -891,7 +957,6 @@ def main():
         "seed": int(cfg.get("seed", 0)),
         "learning_rate": float(cfg.get("learning_rate", 1e-6)),
         "lr_scheduler_type": str(cfg.get("lr_scheduler_type", "cosine")),
-        "warmup_ratio": float(cfg.get("warmup_ratio", 0.03)),
         "max_grad_norm": float(cfg.get("max_grad_norm", 1.0)),
         "weight_decay": float(cfg.get("weight_decay", 0.0)),
         "num_train_epochs": float(cfg.get("num_train_epochs", 1)),
@@ -902,10 +967,14 @@ def main():
         "save_total_limit": int(cfg.get("save_total_limit", 3)),
         "bf16": bool(cfg.get("bf16", True)),
         "remove_unused_columns": False,
-        "gradient_checkpointing": bool(cfg.get("gradient_checkpointing", True)),
+        "gradient_checkpointing": gradient_checkpointing_enabled,
+        "gradient_checkpointing_kwargs": {"use_reentrant": False},
+        "ddp_find_unused_parameters": bool(cfg.get("ddp_find_unused_parameters", False)),
+        "ddp_broadcast_buffers": bool(cfg.get("ddp_broadcast_buffers", False)),
         "report_to": cfg.get("report_to", "none"),
         "max_prompt_length": cfg.get("max_prompt_length", None),
         "max_completion_length": int(cfg.get("max_completion_length", 256)),
+        "min_completion_length": int(cfg.get("min_completion_length", 1)),
         "num_generations": int(cfg.get("num_generations", 4)),
         "do_sample": bool(cfg.get("do_sample", False)),
         "temperature": float(cfg.get("temperature", 1.0)),
@@ -915,6 +984,11 @@ def main():
         "dataloader_num_workers": int(cfg.get("dataloader_num_workers", 0)),
         "log_completions": bool(cfg.get("log_completions", True)),
     }
+    if cfg.get("warmup_steps", None) is not None:
+        grpo_kwargs["warmup_steps"] = int(cfg.get("warmup_steps"))
+    else:
+        grpo_kwargs["warmup_ratio"] = float(cfg.get("warmup_ratio", 0.03))
+
     grpo_cfg = GRPOConfig(**_to_supported_kwargs(GRPOConfig, grpo_kwargs))
 
     trainer_kwargs = {
