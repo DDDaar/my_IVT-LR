@@ -126,10 +126,6 @@ def _make_ivtlr_trl_compatible(ivtlr_model: IVTLR, cfg: Optional[Dict[str, Any]]
                 .expand(input_ids.shape[0], -1)
             )
 
-        if labels is None:
-            # GRPO uses logits to compute policy gradients. Loss is ignored.
-            labels = input_ids.clone()
-
         return original_forward(
             input_ids=input_ids,
             attention_mask=attention_mask,
@@ -200,7 +196,7 @@ def _make_ivtlr_trl_compatible(ivtlr_model: IVTLR, cfg: Optional[Dict[str, Any]]
         outputs = self.forward(
             input_ids=current_ids,
             attention_mask=torch.ones_like(current_ids) if attention_mask is None else attention_mask,
-            labels=current_ids.clone(),
+            labels=None,
             position_ids=position_ids,
             pixel_values=pixel_values,
             image_grid_thw=image_grid_thw,

@@ -992,32 +992,33 @@ class IVTLR(nn.Module):
             all_logits.append(outputs.logits)
 
         logits = torch.cat(all_logits, dim=-2)  # (B, total_len, V)
-        B, final_S, V = logits.size()
+        loss = None
+        if labels is not None:
+            B, final_S, _ = logits.size()
 
-        # 由于模型在 forward 过程中通过 torch.cat 插入了 $K$ 个图像 Patch，原始的 labels 长度已经与输出的 logits 长度不匹配了。
-        # final_S 是拼接图像后的总长度
-        new_labels = torch.full((B, final_S), -100, device=input_ids.device, dtype=labels.dtype)
-        for b in range(B):
+            # 由于模型在 forward 过程中通过 torch.cat 插入了 $K$ 个图像 Patch，原始的 labels 长度已经与输出的 logits 长度不匹配了。
+            # final_S 是拼接图像后的总长度
+            new_labels = torch.full((B, final_S), -100, device=input_ids.device, dtype=labels.dtype)
             num_labels = labels.size(1)
             #将原始的 labels（即你希望模型预测的文本部分）填入 new_labels 的末尾
             new_labels[:, -num_labels:] = labels
-        shift_logits = logits[..., :-1, :].contiguous()
-        shift_labels = new_labels[..., 1:].contiguous()
-        
-        # --- 【新增检查点 3】 ---
-        if torch.isnan(shift_logits).any():
-            print("🚨 警告: 最终拼接的 shift_logits 中包含 NaN！")
-            #import pdb; pdb.set_trace()
-        # -----------------------
-        
-        loss_fct = CrossEntropyLoss(ignore_index=-100)
-        loss = loss_fct(shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1))
+            shift_logits = logits[..., :-1, :].contiguous()
+            shift_labels = new_labels[..., 1:].contiguous()
 
-        # --- 【最终检查】 ---
-        if torch.isnan(loss):
-            print("🚨 训练崩溃: 计算出的 Loss 为 NaN！优化器将跳过更新。")
-            #import pdb; pdb.set_trace()
-        # -------------------
+            # --- 【新增检查点 3】 ---
+            if torch.isnan(shift_logits).any():
+                print("🚨 警告: 最终拼接的 shift_logits 中包含 NaN！")
+                #import pdb; pdb.set_trace()
+            # -----------------------
+
+            loss_fct = CrossEntropyLoss(ignore_index=-100)
+            loss = loss_fct(shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1))
+
+            # --- 【最终检查】 ---
+            if torch.isnan(loss):
+                print("🚨 训练崩溃: 计算出的 Loss 为 NaN！优化器将跳过更新。")
+                #import pdb; pdb.set_trace()
+            # -------------------
         
         return Outputs(loss=loss, inputs_embeds=inputs_embeds, logits=logits)
 
