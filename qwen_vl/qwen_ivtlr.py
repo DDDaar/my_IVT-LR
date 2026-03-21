@@ -65,20 +65,49 @@ class IVTLR(nn.Module):
         self.processor = AutoProcessor.from_pretrained(model_path, use_fast=False)
         # self.processor = ChameleonProcessor.from_pretrained("facebook/chameleon-7b")
 
-    def _get_visual_tower(self):
-        # Compatible with both layouts:
-        # 1) base_causallm.visual
-        # 2) base_causallm.model.visual
-        if hasattr(self.base_causallm, "visual"):
-            return self.base_causallm.visual
+        # Cache resolved visual tower to avoid repeated wrapper traversal.
+        self._cached_visual_tower = None
+        self._cached_visual_tower_path = None
 
-        inner_model = getattr(self.base_causallm, "model", None)
-        if inner_model is not None and hasattr(inner_model, "visual"):
-            return inner_model.visual
+    def _get_visual_tower(self):
+        if self._cached_visual_tower is not None:
+            return self._cached_visual_tower
+
+        # Traverse common wrapper stacks for DDP/Accelerate/PEFT/HF wrappers.
+        queue = [("base_causallm", self.base_causallm)]
+        visited = set()
+        traversed_paths = []
+
+        while queue:
+            cur_path, cur_obj = queue.pop(0)
+            if cur_obj is None:
+                continue
+            obj_id = id(cur_obj)
+            if obj_id in visited:
+                continue
+            visited.add(obj_id)
+
+            if hasattr(cur_obj, "visual"):
+                self._cached_visual_tower = getattr(cur_obj, "visual")
+                self._cached_visual_tower_path = f"{cur_path}.visual"
+                if self._cached_visual_tower_path not in (
+                    "base_causallm.visual",
+                    "base_causallm.model.visual",
+                ):
+                    print(f"[IVTLR] Visual tower resolved via `{self._cached_visual_tower_path}`")
+                return self._cached_visual_tower
+
+            for attr in ("module", "model", "base_model"):
+                nxt = getattr(cur_obj, attr, None)
+                if nxt is not None:
+                    nxt_path = f"{cur_path}.{attr}"
+                    queue.append((nxt_path, nxt))
+                    if len(traversed_paths) < 16:
+                        traversed_paths.append(nxt_path)
 
         raise AttributeError(
-            "Cannot find vision tower on base_causallm. "
-            "Tried `base_causallm.visual` and `base_causallm.model.visual`."
+            "Cannot find vision tower on base_causallm wrapper chain. "
+            f"Tried wrapper paths={traversed_paths}"
         )
 
     def _get_visual_dtype(self):

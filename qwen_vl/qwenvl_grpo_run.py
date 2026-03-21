@@ -749,10 +749,19 @@ def build_reward_functions(cfg: Dict[str, Any]):
     acc_wrong = float(cfg.get("reward_acc_wrong", -0.2))
     acc_missing = float(cfg.get("reward_acc_missing", -0.4))
     verbose_rollout = bool(cfg.get("verbose_rollout_print", False))
+
+    # Default to no truncation for clearer rollout diagnostics.
+    verbose_rollout_truncate = bool(cfg.get("verbose_rollout_truncate", False))
     verbose_max_chars = int(cfg.get("verbose_rollout_max_chars", 300))
+
     print_only_rank0 = bool(cfg.get("verbose_rollout_rank0_only", True))
     verbose_dump_on_missing = bool(cfg.get("verbose_rollout_dump_on_missing", True))
     verbose_dump_raw_completion = bool(cfg.get("verbose_rollout_dump_raw_completion", True))
+
+    # Prefer grouping by num_generations so multiple rollouts of one question are adjacent.
+    rollout_group_size = int(cfg.get("verbose_rollout_group_size", cfg.get("num_generations", 1)))
+    if rollout_group_size <= 0:
+        rollout_group_size = 1
 
     def _should_print():
         if not verbose_rollout:
@@ -768,9 +777,40 @@ def build_reward_functions(cfg: Dict[str, Any]):
             return True
 
     def _truncate(text: str) -> str:
+        if not verbose_rollout_truncate:
+            return text
         if len(text) <= verbose_max_chars:
             return text
         return text[:verbose_max_chars] + "...<truncated>"
+
+    def _normalize_prompt_list(prompt_list: Any, n: int) -> List[str]:
+        if isinstance(prompt_list, list):
+            return [str(prompt_list[i]) if i < len(prompt_list) else "" for i in range(n)]
+        if isinstance(prompt_list, str):
+            return [prompt_list for _ in range(n)]
+        return ["" for _ in range(n)]
+
+    def _build_rollout_groups(prompts: List[str], n: int) -> List[List[int]]:
+        if n <= 0:
+            return []
+
+        if rollout_group_size > 1 and n % rollout_group_size == 0:
+            return [list(range(s, s + rollout_group_size)) for s in range(0, n, rollout_group_size)]
+
+        # Fallback: group contiguous samples with identical prompt text.
+        groups: List[List[int]] = []
+        current: List[int] = []
+        prev_prompt: Optional[str] = None
+        for i in range(n):
+            cur_prompt = prompts[i]
+            if current and cur_prompt != prev_prompt:
+                groups.append(current)
+                current = []
+            current.append(i)
+            prev_prompt = cur_prompt
+        if current:
+            groups.append(current)
+        return groups
 
     def accuracy_reward(completions, ground_truth=None, valid_letters=None, **kwargs):
         rewards = []
@@ -800,49 +840,58 @@ def build_reward_functions(cfg: Dict[str, Any]):
                 rewards.append(acc_wrong * acc_weight)
 
         if _should_print():
-            # Log each question rollout in current reward call.
-            for i, (completion, gt, letters, reward) in enumerate(
-                zip(completions, ground_truth, valid_letters, rewards)
-            ):
-                text = _completion_to_text(completion)
-                gt_letter = str(gt).strip().upper()
-                valid = _parse_valid_letters(letters)
-                pred = _extract_answer_letter(text, valid)
-                prompt_i = ""
-                if isinstance(prompt_list, list) and i < len(prompt_list):
-                    prompt_i = str(prompt_list[i])
-                elif isinstance(prompt_list, str):
-                    prompt_i = prompt_list
+            n = min(len(completions), len(ground_truth), len(valid_letters), len(rewards))
+            prompts = _normalize_prompt_list(prompt_list, n)
+            groups = _build_rollout_groups(prompts, n)
 
-                if prompt_i:
+            for q_idx, group in enumerate(groups):
+                first = group[0]
+                gt_q = str(ground_truth[first]).strip().upper()
+                prompt_q = prompts[first]
+
+                print(
+                    "[QUESTION]"
+                    f" q_idx={q_idx}"
+                    f" gt={gt_q}"
+                    f" num_rollouts={len(group)}"
+                    f" idx_range={group[0]}-{group[-1]}"
+                )
+                if prompt_q:
+                    print(f"[QUESTION_PROMPT] { _truncate(prompt_q) }")
+
+                for r_idx, i in enumerate(group):
+                    completion = completions[i]
+                    text = _completion_to_text(completion)
+                    gt_letter = str(ground_truth[i]).strip().upper()
+                    valid = _parse_valid_letters(valid_letters[i])
+                    pred = _extract_answer_letter(text, valid)
+                    reward = rewards[i]
+
                     print(
                         "[ROLLOUT]"
+                        f" q_idx={q_idx}"
+                        f" rollout={r_idx}"
                         f" idx={i}"
                         f" gt={gt_letter}"
                         f" pred={pred}"
                         f" reward={reward:.4f}"
-                        f" prompt={_truncate(prompt_i)}"
                     )
-                else:
-                    print(
-                        "[ROLLOUT]"
-                        f" idx={i}"
-                        f" gt={gt_letter}"
-                        f" pred={pred}"
-                        f" reward={reward:.4f}"
-                    )
-                print(f"[ROLLOUT_COMPLETION] { _truncate(text) }")
-                if pred is None and verbose_dump_on_missing:
-                    print(
-                        "[ROLLOUT_DEBUG]"
-                        f" idx={i}"
-                        f" completion_type={type(completion).__name__}"
-                        f" gt={gt_letter}"
-                        f" valid_letters={sorted(valid) if valid else 'ALL'}"
-                    )
-                    print(f"[ROLLOUT_TEXT_REPR] { _truncate(repr(text)) }")
-                    if verbose_dump_raw_completion:
-                        print(f"[ROLLOUT_RAW_COMPLETION] { _truncate(repr(completion)) }")
+                    print(f"[ROLLOUT_COMPLETION] { _truncate(text) }")
+
+                    if pred is None and verbose_dump_on_missing:
+                        print(
+                            "[ROLLOUT_DEBUG]"
+                            f" q_idx={q_idx}"
+                            f" rollout={r_idx}"
+                            f" idx={i}"
+                            f" completion_type={type(completion).__name__}"
+                            f" gt={gt_letter}"
+                            f" valid_letters={sorted(valid) if valid else 'ALL'}"
+                        )
+                        print(f"[ROLLOUT_TEXT_REPR] { _truncate(repr(text)) }")
+                        if verbose_dump_raw_completion:
+                            print(f"[ROLLOUT_RAW_COMPLETION] { _truncate(repr(completion)) }")
+
         return rewards
 
     return [accuracy_reward]

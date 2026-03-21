@@ -14,7 +14,7 @@ seed: 42
 num_proc: 1
 
 # Keep latent placeholder style aligned with SFT final stage.
-max_latent_stage: 5
+max_latent_stage: 3
 pad_latent_to_max: true
 
 # Model selection

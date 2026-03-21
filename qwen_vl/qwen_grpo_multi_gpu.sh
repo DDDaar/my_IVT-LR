@@ -13,6 +13,8 @@ find /home/ma-user/.cache/huggingface/datasets/ -type f -name "*of_00032.arrow" 
 export HF_DATASETS_CACHE="/home/ma-user/work/lbx/hf_data_cache"
 find /home/ma-user/work/lbx/hf_data_cache -type f -name "*of_00032.arrow" -mmin +300 -delete
 export WANDB_API_KEY=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
+export HF_TOKEN=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
+export HF_ENDPOINT=https://hf-mirror.com
 
 NUM_PROCESSES="${1:-auto}"
 CONFIG_PATH="${2:-args/qwen_grpo.yaml}"
