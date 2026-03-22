@@ -400,7 +400,7 @@ class IVTLR(nn.Module):
         
         #将所有序列统一到最大长度，方便批处理
         max_len = 2000
-        print(f'序列长s是{S}')
+        # print(f'序列长s是{S}')
         image_mask = torch.zeros((B, max_len), dtype=torch.bool, device=input_ids.device)
         image_mask[:, :S] = image_mask_init
 

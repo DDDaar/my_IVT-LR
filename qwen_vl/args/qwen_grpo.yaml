@@ -27,7 +27,7 @@ attn_implementation: "sdpa"
 # Must point to your previous SFT ckpt:
 # 1) adapter directory (contains adapter_config.json), or
 # 2) fp32 full state dict file, such as epoch_x_full_model_fp32.pth
-sft_ckpt_path: "/home/ma-user/work/lbx/IVT-LR/qwen_vl/output/m3cot_qwen2vl_IVTLR/epoch_16_full_model_fp32.pth"
+sft_ckpt_path: "/home/ma-user/work/lbx/IVT-LR/qwen_vl/output/m3cot_qwen2vl_2B_IVTLR/epoch_16_full_model_fp32.pth"
 
 # LoRA switch
 use_lora: true
@@ -50,7 +50,7 @@ bf16: true
 gradient_checkpointing: true
 disable_gc_for_ddp: false
 # Keep aligned with SFT setting in checkpoint name: choose_8_topk
-num_selected_patches: 4
+num_selected_patches: 32
 ddp_find_unused_parameters: false
 ddp_broadcast_buffers: false
 min_ckpt_match_ratio: 0.30
@@ -84,8 +84,8 @@ log_completions: true
 # ACC reward only
 reward_acc_weight: 1.0
 reward_acc_correct: 1.0
-reward_acc_wrong: -0.2
-reward_acc_missing: -0.4
+reward_acc_wrong: 0.0
+reward_acc_missing: 0.0
 
 # Rollout verbose logging (each reward call item)
 verbose_rollout_print: true
