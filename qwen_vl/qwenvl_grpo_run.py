@@ -622,6 +622,162 @@ def _checkpoint_has_lora_keys(state_dict: Dict[str, torch.Tensor]) -> bool:
     return any(("lora_" in k) or (".base_layer." in k) for k in state_dict.keys())
 
 
+def _to_cpu_fp32_state_dict(state_dict: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+    exported: Dict[str, torch.Tensor] = {}
+    for key, value in state_dict.items():
+        if torch.is_tensor(value):
+            tensor = value.detach()
+            if tensor.is_floating_point():
+                tensor = tensor.float()
+            exported[key] = tensor.cpu()
+        else:
+            exported[key] = value
+    return exported
+
+
+def _collect_state_dict_for_export(trainer) -> Dict[str, torch.Tensor]:
+    """
+    Collect a full state_dict for inference export.
+    Prefer trainer.model.state_dict() to keep key style aligned with infer.py.
+    """
+    state_dict: Optional[Dict[str, torch.Tensor]] = None
+
+    model = getattr(trainer, "model", None)
+    if model is not None:
+        try:
+            state_dict = model.state_dict()
+        except Exception as exc:
+            print(f"[Save] trainer.model.state_dict() failed; fallback to accelerator: {exc}")
+
+    if not isinstance(state_dict, dict) or len(state_dict) == 0:
+        accelerator = getattr(trainer, "accelerator", None)
+        model_wrapped = getattr(trainer, "model_wrapped", None)
+        if accelerator is not None and model_wrapped is not None:
+            state_dict = accelerator.get_state_dict(model_wrapped)
+
+    if not isinstance(state_dict, dict) or len(state_dict) == 0:
+        raise RuntimeError("Failed to collect state_dict for infer-compatible export.")
+
+    return _strip_module_prefix(state_dict)
+
+
+def _is_main_process() -> bool:
+    if torch.distributed.is_available() and torch.distributed.is_initialized():
+        return torch.distributed.get_rank() == 0
+    rank = os.environ.get("RANK", None)
+    if rank is None:
+        return True
+    try:
+        return int(rank) == 0
+    except Exception:
+        return True
+
+
+def _distributed_barrier() -> None:
+    if torch.distributed.is_available() and torch.distributed.is_initialized():
+        torch.distributed.barrier()
+
+
+def _save_model_pth_from_model(
+    model,
+    output_dir: str,
+    file_name: str,
+    log_prefix: str = "[Save]",
+) -> Optional[str]:
+    _distributed_barrier()
+    if not _is_main_process():
+        _distributed_barrier()
+        return None
+
+    if model is None:
+        raise RuntimeError("Model is None during .pth export.")
+
+    os.makedirs(output_dir, exist_ok=True)
+    file_name = str(file_name)
+    if not file_name.endswith(".pth"):
+        file_name = f"{file_name}.pth"
+
+    export_path = os.path.join(output_dir, file_name)
+    source_state_dict = _strip_module_prefix(model.state_dict())
+    cpu_fp32_state_dict = _to_cpu_fp32_state_dict(source_state_dict)
+    torch.save(cpu_fp32_state_dict, export_path)
+    print(f"{log_prefix} Exported infer-compatible checkpoint: {export_path}")
+
+    del source_state_dict
+    del cpu_fp32_state_dict
+    gc.collect()
+    _distributed_barrier()
+    return export_path
+
+
+def _save_infer_compatible_pth(
+    trainer,
+    output_dir: str,
+    file_name: str,
+    log_prefix: str = "[Save][Final]",
+) -> Optional[str]:
+    """
+    Export a plain .pth state_dict compatible with infer.py strict loading.
+    """
+    accelerator = getattr(trainer, "accelerator", None)
+    if accelerator is not None:
+        accelerator.wait_for_everyone()
+
+    if not bool(getattr(trainer, "is_world_process_zero", lambda: True)()):
+        if accelerator is not None:
+            accelerator.wait_for_everyone()
+        return None
+
+    os.makedirs(output_dir, exist_ok=True)
+    file_name = str(file_name)
+    if not file_name.endswith(".pth"):
+        file_name = f"{file_name}.pth"
+    export_path = os.path.join(output_dir, file_name)
+
+    source_state_dict = _collect_state_dict_for_export(trainer)
+    cpu_fp32_state_dict = _to_cpu_fp32_state_dict(source_state_dict)
+    torch.save(cpu_fp32_state_dict, export_path)
+    print(f"{log_prefix} Exported infer-compatible checkpoint: {export_path}")
+
+    del source_state_dict
+    del cpu_fp32_state_dict
+    gc.collect()
+
+    if accelerator is not None:
+        accelerator.wait_for_everyone()
+    return export_path
+
+
+class StepPthSaveCallback(TrainerCallback):
+    def __init__(self, save_steps: int, output_dir: str):
+        self.save_steps = max(1, int(save_steps))
+        self.output_dir = output_dir
+        self._last_saved_step = -1
+
+    def on_step_end(self, args, state, control, **kwargs):
+        global_step = int(getattr(state, "global_step", 0))
+        if global_step <= 0:
+            return control
+        if global_step % self.save_steps != 0:
+            return control
+        if global_step == self._last_saved_step:
+            return control
+
+        model = kwargs.get("model", None)
+        file_name = f"step_{global_step}_full_model_fp32.pth"
+        try:
+            _save_model_pth_from_model(
+                model=model,
+                output_dir=self.output_dir,
+                file_name=file_name,
+                log_prefix="[Save][Step]",
+            )
+            self._last_saved_step = global_step
+        except Exception as exc:
+            print(f"[Save][Step] Failed to export step checkpoint at step={global_step}: {exc}")
+        return control
+
+
 def _load_sft_checkpoint_into_model(
     model, tokenizer, processor, cfg: Dict[str, Any], model_path: str
 ):
@@ -1072,6 +1228,7 @@ def main():
         "per_device_train_batch_size": int(cfg.get("per_device_train_batch_size", 1)),
         "gradient_accumulation_steps": int(cfg.get("gradient_accumulation_steps", 8)),
         "logging_steps": int(cfg.get("logging_steps", 1)),
+        "save_strategy": "no",
         "save_steps": int(cfg.get("save_steps", 50)),
         "save_total_limit": int(cfg.get("save_total_limit", 3)),
         "bf16": bool(cfg.get("bf16", True)),
@@ -1108,12 +1265,16 @@ def main():
     #     "train_dataset": train_dataset,
     # }
 
+    step_save_every = int(cfg.get("save_steps", 50))
     trainer_kwargs = {
             "model": model,
             "reward_funcs": reward_funcs,
             "args": grpo_cfg,
             "train_dataset": train_dataset,
-            "callbacks": [MemoryMonitorCallback(top_n=15)]  # <--- 在这里添加回调
+            "callbacks": [
+                MemoryMonitorCallback(top_n=15),
+                StepPthSaveCallback(save_steps=step_save_every, output_dir=output_dir),
+            ],
         }
     
     trainer_init_sig = inspect.signature(GRPOTrainer.__init__)
@@ -1127,12 +1288,19 @@ def main():
     trainer.data_collator = _grpo_collator
     trainer.train()
 
-    final_dir = os.path.join(output_dir, "final")
-    trainer.save_model(final_dir)
-    if hasattr(processor, "save_pretrained"):
-        processor.save_pretrained(final_dir)
-    tokenizer.save_pretrained(final_dir)
-    print(f"[Done] GRPO finished. Artifacts saved to: {final_dir}")
+    final_step = int(getattr(trainer.state, "global_step", 0))
+    final_name = f"final_step_{final_step}_full_model_fp32.pth"
+    final_pth = _save_infer_compatible_pth(
+        trainer=trainer,
+        output_dir=output_dir,
+        file_name=final_name,
+        log_prefix="[Save][Final]",
+    )
+
+    if final_pth:
+        print(f"[Done] GRPO finished. final_infer_pth={final_pth}")
+    else:
+        print("[Done] GRPO finished.")
 
 
 if __name__ == "__main__":

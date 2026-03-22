@@ -9,7 +9,7 @@ output_dir: "/home/ma-user/work/lbx/IVT-LR/qwen_vl/output_grpo/m3cot_qwen2vl_grp
 dataset_name: "m3cot"
 
 # Fixed-seed subset for GRPO debugging/warm-start. Set -1 for full set.
-k_samples: 64
+k_samples: 10
 seed: 42
 num_proc: 1
 
@@ -45,6 +45,7 @@ lora_target_modules:
   - "down_proj"
 
 # GRPO optimization
+deepspeed: "/home/ma-user/work/lbx/IVT-LR/qwen_vl/ds_config_grpo.json"
 bf16: true
 gradient_checkpointing: true
 disable_gc_for_ddp: false
@@ -62,8 +63,8 @@ lr_scheduler_type: "cosine"
 
 num_train_epochs: 1
 per_device_train_batch_size: 1
-num_generations: 2
-gradient_accumulation_steps: 2
+num_generations: 8
+gradient_accumulation_steps: 8
 
 dataloader_num_workers: 0
 
@@ -93,6 +94,6 @@ verbose_rollout_rank0_only: true
 
 # Logging / checkpointing
 logging_steps: 1
-save_steps: 50
+save_steps: 1000
 save_total_limit: 3
 report_to: "none"  # "wandb" or "none"

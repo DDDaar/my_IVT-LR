@@ -466,12 +466,7 @@ class IVTLR(nn.Module):
                     #import pdb; pdb.set_trace()
                 # -----------------------
                 
-                hidden_states = outputs.hidden_states[-1]     # 最后一层的隐藏状态 
-                
-                all_hidden_states = outputs.hidden_states  # 所有层的隐藏状态
-                
-                
-                
+                hidden_states = outputs.hidden_states[-1]     # 最后一层的隐藏状态
                 attentions    = outputs.attentions        #所有注意力层的注意力权重列表 list of (B, heads, seq_len, seq_len)
                 kv_cache      = outputs.past_key_values
 
@@ -479,7 +474,16 @@ class IVTLR(nn.Module):
 
 #######################################################################原始                
                 #   Top-K
-                avg_attn = torch.cat(attentions, dim=1).mean(dim=1)  # (B, seq_len) 将所有层的注意力矩阵在 heads（头）维度上拼接，(B, L * heads, seq_len, seq_len)---->(B, seq_len, seq_len)
+                # Streamed layer/head averaging to avoid allocating one giant
+                # [B, layers*heads, S, S] temporary tensor.
+                avg_attn = None
+                for layer_attn in attentions:
+                    layer_mean = layer_attn.mean(dim=1)  # (B, S, S)
+                    if avg_attn is None:
+                        avg_attn = layer_mean
+                    else:
+                        avg_attn = avg_attn + layer_mean
+                avg_attn = avg_attn / max(len(attentions), 1)
                 current_seq_len = avg_attn.size(1) #seq长度
 
                 select_image_embeds = []
@@ -488,14 +492,8 @@ class IVTLR(nn.Module):
                     #最后一个位置的注意力图
                     last_attn = avg_attn[b, end - 1]  # shape=(seq_len,)
                     vs, ve = vs_pos_per_batch[b], ve_pos_per_batch[b]
-                    scores = last_attn.clone()
-                    
-                    allowed_positions = image_mask[b, :current_seq_len]  # shape=(S,)
-                    invalid = ~allowed_positions
-                    #将非图像位置的分数设为负无穷，确保不会被选中
-                    scores[invalid] = float("-inf")
-
-                    rel_scores = scores[vs+1 : ve]  # (image_len,)
+                    rel_allowed = image_mask[b, vs + 1 : ve]  # shape=(image_len,)
+                    rel_scores = last_attn[vs + 1 : ve].masked_fill(~rel_allowed, float("-inf"))
                     #选择图像token中的topk个
                     topk_rel = rel_scores.topk(self.num_selected_patches, sorted=False)[1]  # rel idx
                     abs_idxs = (vs + 1) + topk_rel
@@ -867,7 +865,7 @@ class IVTLR(nn.Module):
                     #import pdb; pdb.set_trace()
                 # -----------------------
             
-                inputs_embeds_detached = inputs_embeds.detach().clone()
+                inputs_embeds_detached = inputs_embeds.clone()
                 for b in range(B):
                     if len(latent_lists[b]) > pass_idx:
                         #在特定位置用新的hidden_states替换原来的token embeddings。
@@ -875,77 +873,61 @@ class IVTLR(nn.Module):
                         rel_pos = t_idx - 1 - hidden_states_offset
                         rel_pos = max(0, min(rel_pos, hidden_states.size(1) - 1))
                         #在指定位置t_idx用新的hidden_states替换原有的embedding,进而修改input embedding
-                        inputs_embeds_detached[b, t_idx, :] = hidden_states[b, rel_pos, :]
+                        inputs_embeds_detached[b, t_idx, :] = hidden_states[b, rel_pos, :].detach()
 
-                inputs_embeds.data = inputs_embeds_detached
-                new_inputs_embeds = []
-                new_attention_mask = []
-                new_position_ids = []
-                new_original_mask = []
-                new_image_mask = []
-                batch_max_len = 0
+                inputs_embeds = inputs_embeds_detached
+                K = self.num_selected_patches
+                old_len = inputs_embeds.size(1)
+                new_len = old_len + K
+                hidden_dim = inputs_embeds.size(-1)
 
-                for b in range(B):
-                    end_b = end
-                    prefix_b = inputs_embeds[b, :end_b, :]    # (end_b, D) # 截取图片插入点之前的向量
-                    suffix_b = inputs_embeds[b, end_b:, :]    # (old_len - end_b, D)  # 截取图片插入点之后的向量
-                    v_embed_b = select_image_embeds[b]       # (K, D)  # 提取的图片向量
-                    merged_b = torch.cat([prefix_b, v_embed_b, suffix_b], dim=0)  # (old_len+K, D) # 拼接：前缀 + 图片 + 后缀
-                    new_inputs_embeds.append(merged_b)
+                # Pre-allocate merged tensors to avoid repeated torch.cat allocations.
+                merged_inputs_embeds = inputs_embeds.new_empty((B, new_len, hidden_dim))
+                merged_inputs_embeds[:, :end, :] = inputs_embeds[:, :end, :]
+                merged_inputs_embeds[:, end : end + K, :] = select_image_embeds
+                merged_inputs_embeds[:, end + K :, :] = inputs_embeds[:, end:, :]
 
-                    # attention_mask
-                    att_pref = attention_mask[b, :end_b]      # (end_b,)
-                    att_suf  = attention_mask[b, end_b:]      # (old_len-end_b,)
-                    # 为图片生成全为 1 的 mask，表示模型需要关注这些图像内容
-                    att_v    = torch.ones(self.num_selected_patches, device=attention_mask.device, dtype=attention_mask.dtype)
-                    merged_att = torch.cat([att_pref, att_v, att_suf], dim=0)  # (new_len,)
-                    new_attention_mask.append(merged_att)
+                merged_attention_mask = attention_mask.new_empty((B, new_len))
+                merged_attention_mask[:, :end] = attention_mask[:, :end]
+                merged_attention_mask[:, end : end + K] = 1
+                merged_attention_mask[:, end + K :] = attention_mask[:, end:]
 
-                    # position_ids 简单地重新生成了一串从 0 到 new_len-1 的连续整数作为新的位置索引。
-                    new_pos = torch.arange(merged_b.size(0), device=position_ids.device)
-                    new_position_ids.append(new_pos)
+                merged_position_ids = torch.arange(
+                    new_len, device=position_ids.device, dtype=position_ids.dtype
+                ).unsqueeze(0).expand(B, -1)
 
-                    # original_mask 新增的图片token处mask为0
-                    orig_pref = original_mask[b, :end_b]       # (end_b,)
-                    orig_suf  = original_mask[b, end_b:]       # (old_len-end_b,)
-                    orig_v    = torch.zeros(self.num_selected_patches, device=input_ids.device, dtype=torch.bool)
-                    merged_orig = torch.cat([orig_pref, orig_v, orig_suf], dim=0)
-                    new_original_mask.append(merged_orig)
+                merged_original_mask = original_mask.new_empty((B, new_len))
+                merged_original_mask[:, :end] = original_mask[:, :end]
+                merged_original_mask[:, end : end + K] = False
+                merged_original_mask[:, end + K :] = original_mask[:, end:]
 
-                    # image_mask 新增的图片token处mask为0
-                    img_pref = image_mask[b, :end_b]
-                    img_suf  = image_mask[b, end_b:]
-                    img_v    = torch.zeros(self.num_selected_patches, device=input_ids.device, dtype=torch.bool)
-                    merged_img = torch.cat([img_pref, img_v, img_suf], dim=0)
-                    new_image_mask.append(merged_img)
+                image_mask_active = image_mask
+                if image_mask_active.size(1) > old_len:
+                    image_mask_active = image_mask_active[:, :old_len]
+                elif image_mask_active.size(1) < old_len:
+                    pad_cols = old_len - image_mask_active.size(1)
+                    image_mask_active = torch.cat(
+                        [
+                            image_mask_active,
+                            torch.zeros(
+                                (B, pad_cols),
+                                dtype=image_mask_active.dtype,
+                                device=image_mask_active.device,
+                            ),
+                        ],
+                        dim=1,
+                    )
 
-                    batch_max_len = max(batch_max_len, merged_b.size(0))
+                merged_image_mask = image_mask_active.new_empty((B, new_len))
+                merged_image_mask[:, :end] = image_mask_active[:, :end]
+                merged_image_mask[:, end : end + K] = False
+                merged_image_mask[:, end + K :] = image_mask_active[:, end:]
 
-                #将循环处理得到的列表（List）数据重新封装，恢复成 Tensor 格式的 Batch（批次）数据，以便模型能够并行计算
-                padded_embeds = []
-                padded_att   = []
-                padded_pos   = []
-                padded_orig  = []
-                padded_img   = []
-
-                for b in range(B):
-                    emb_b = new_inputs_embeds[b]
-                    att_b = new_attention_mask[b]
-                    pos_b = new_position_ids[b]
-                    orig_b = new_original_mask[b]
-                    img_b = new_image_mask[b]
-
-                    padded_embeds.append(emb_b.unsqueeze(0))
-                    padded_att.append(att_b.unsqueeze(0))
-                    padded_pos.append(pos_b.unsqueeze(0))
-                    padded_orig.append(orig_b.unsqueeze(0))
-                    padded_img.append(img_b.unsqueeze(0))
-
-                inputs_embeds = torch.cat(padded_embeds, dim=0)    
-                attention_mask = torch.cat(padded_att, dim=0)      
-                position_ids    = torch.cat(padded_pos, dim=0)     
-                original_mask  = torch.cat(padded_orig, dim=0)
-                image_mask     = torch.cat(padded_img, dim=0)   # (B, new_S)
+                inputs_embeds = merged_inputs_embeds
+                attention_mask = merged_attention_mask
+                position_ids = merged_position_ids
+                original_mask = merged_original_mask
+                image_mask = merged_image_mask   # (B, new_S)
                 K = self.num_selected_patches
                 # 当你把 $K$ 个图像特征（Patches）插入到原始文本序列中后，原本排在插入点之后的那些“特殊位置”或“潜在特征点”（Latent Positions）的索引就全部对不上了。这段逻辑就是在做索引重映射（Index Shifting）。
                 for b in range(B):
