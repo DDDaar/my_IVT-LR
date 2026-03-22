@@ -27,7 +27,7 @@ attn_implementation: "sdpa"
 # Must point to your previous SFT ckpt:
 # 1) adapter directory (contains adapter_config.json), or
 # 2) fp32 full state dict file, such as epoch_x_full_model_fp32.pth
-sft_ckpt_path: "/home/ma-user/work/lbx/IVT-LR/qwen_vl/output/m3cot_qwen2vl_2B_IVTLRchoose_8_topk/epoch_16_full_model_fp32.pth"
+sft_ckpt_path: "/home/ma-user/work/lbx/IVT-LR/qwen_vl/output/m3cot_qwen2vl_IVTLR/epoch_16_full_model_fp32.pth"
 
 # LoRA switch
 use_lora: true
@@ -96,4 +96,4 @@ verbose_rollout_rank0_only: true
 logging_steps: 1
 save_steps: 1000
 save_total_limit: 3
-report_to: "none"  # "wandb" or "none"
+report_to: "wandb"  # "wandb" or "none"
