@@ -1153,7 +1153,12 @@ def main():
     tokenizer.add_tokens("<|end-latent|>")
     tokenizer.add_tokens("<|latent|>")
 
-    processor = AutoProcessor.from_pretrained(model_path, tokenizer=tokenizer, use_fast=False)
+
+    
+    #processor = AutoProcessor.from_pretrained(model_path, tokenizer=tokenizer, use_fast=False)
+    processor = AutoProcessor.from_pretrained(model_path, tokenizer=tokenizer, use_fast=False,
+                                               min_pixels=280*280,max_pixels=280*280)
+    
     if hasattr(processor, "tokenizer"):
         processor.tokenizer.pad_token = tokenizer.pad_token
         processor.tokenizer.padding_side = tokenizer.padding_side
