@@ -54,7 +54,7 @@ num_selected_patches: 32
 ddp_find_unused_parameters: false
 ddp_broadcast_buffers: false
 min_ckpt_match_ratio: 0.30
-learning_rate: 1.0e-6
+learning_rate: 5e-5
 weight_decay: 0.0
 max_grad_norm: 1.0
 warmup_ratio: 0.03

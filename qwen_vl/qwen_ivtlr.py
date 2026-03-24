@@ -496,6 +496,7 @@ class IVTLR(nn.Module):
                     rel_allowed = image_mask[b, vs + 1 : ve]  # shape=(image_len,)
                     rel_scores = last_attn[vs + 1 : ve].masked_fill(~rel_allowed, float("-inf"))
                     #选择图像token中的topk个
+                    print(f'正在选择 topk 个{self.num_selected_patches}latent vision')
                     topk_rel = rel_scores.topk(self.num_selected_patches, sorted=False)[1]  # rel idx
                     abs_idxs = (vs + 1) + topk_rel
                     logging.debug(f"topk_rel: {topk_rel}")
