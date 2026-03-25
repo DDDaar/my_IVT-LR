@@ -25,7 +25,7 @@ try:
 
     HAS_TORCH_NPU = True
 except Exception:
-    HAS_TORCH_NPU = False
+    HAS_TORCH_NPU = False 
 
 try:
     from trl import GRPOConfig, GRPOTrainer
@@ -829,6 +829,7 @@ def _load_sft_checkpoint_into_model(
         f"unexpected={len(incompatible.unexpected_keys)}"
     )
     return ivtlr_wrapper
+
 
 
 def _to_supported_kwargs(callable_obj, kwargs: Dict[str, Any]) -> Dict[str, Any]:
