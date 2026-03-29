@@ -33,8 +33,10 @@ sft_ckpt_path: "/home/ma-user/work/lbx/IVT-LR/qwen_vl/output/m3cot_qwen2vl_2B_IV
 use_lora: true
 
 ###初始条件，r=64，alpha=16
-lora_r: 64
-lora_alpha: 32
+lora_r: 256
+lora_alpha: 256
+
+sft_lora_alpha: 16
 lora_dropout: 0.05
 lora_bias: "none"
 lora_target_modules:

@@ -778,14 +778,64 @@ class StepPthSaveCallback(TrainerCallback):
         return control
 
 
+# def _load_sft_checkpoint_into_model(
+#     model, tokenizer, processor, cfg: Dict[str, Any], model_path: str
+# ):
+#     """
+#     Keep GRPO checkpoint loading behavior aligned with infer.py:
+#     - torch.load(map_location='cpu')
+#     - strip `module.` prefix when present
+#     - direct strict state_dict load into IVTLR wrapper
+#     """
+#     ckpt_path = cfg.get("sft_ckpt_path", "")
+#     if not ckpt_path:
+#         raise ValueError("sft_ckpt_path is required for GRPO fine-tuning in this workflow.")
+#     if not os.path.exists(ckpt_path):
+#         raise FileNotFoundError(f"sft_ckpt_path not found: {ckpt_path}")
+
+#     # Adapter directory (preferred).
+#     if os.path.isdir(ckpt_path) and os.path.exists(os.path.join(ckpt_path, "adapter_config.json")):
+#         print(f"[CKPT] Loading PEFT adapter from directory: {ckpt_path}")
+#         if isinstance(model, PeftModel):
+#             model.load_adapter(ckpt_path, adapter_name="sft", is_trainable=True)
+#             model.set_adapter("sft")
+#             return _build_ivtlr_wrapper(model, tokenizer, processor, model_path, cfg=cfg)
+#         peft_model = PeftModel.from_pretrained(model, ckpt_path, is_trainable=True)
+#         return _build_ivtlr_wrapper(peft_model, tokenizer, processor, model_path, cfg=cfg)
+
+#     # Full fp32 state dict from SFT (e.g. epoch_x_full_model_fp32.pth).
+#     print(f"[CKPT] Loading full SFT state dict from: {ckpt_path}")
+#     payload = _load_checkpoint_payload(ckpt_path, cfg)
+#     source_sd = _strip_module_prefix(_extract_state_dict(payload))
+#     del payload
+
+#     # If checkpoint carries LoRA/base_layer params, ensure model structure matches.
+#     has_lora = _checkpoint_has_lora_keys(source_sd)
+#     if has_lora and not isinstance(model, PeftModel):
+#         print(
+#             "[CKPT] Detected LoRA/base_layer keys in checkpoint; "
+#             "wrapping base model with PEFT before strict load."
+#         )
+#         model = get_peft_model(model, _build_lora_config(cfg))
+
+#     ivtlr_wrapper = _build_ivtlr_wrapper(model, tokenizer, processor, model_path, cfg=cfg)
+
+#     # infer.py-style strict load.
+#     incompatible = ivtlr_wrapper.load_state_dict(source_sd, strict=True)
+#     print(
+#         "[CKPT] Strict load succeeded: "
+#         f"source_keys={len(source_sd)}, "
+#         f"missing={len(incompatible.missing_keys)}, "
+#         f"unexpected={len(incompatible.unexpected_keys)}"
+#     )
+#     return ivtlr_wrapper
+
 def _load_sft_checkpoint_into_model(
     model, tokenizer, processor, cfg: Dict[str, Any], model_path: str
 ):
     """
-    Keep GRPO checkpoint loading behavior aligned with infer.py:
-    - torch.load(map_location='cpu')
-    - strip `module.` prefix when present
-    - direct strict state_dict load into IVTLR wrapper
+    自动推断 SFT Checkpoint 的 LoRA rank，加载后融合到主干网络 (merge_and_unload)，
+    然后再根据当前 config 初始化新的 LoRA 用于 GRPO 训练。
     """
     ckpt_path = cfg.get("sft_ckpt_path", "")
     if not ckpt_path:
@@ -793,44 +843,83 @@ def _load_sft_checkpoint_into_model(
     if not os.path.exists(ckpt_path):
         raise FileNotFoundError(f"sft_ckpt_path not found: {ckpt_path}")
 
-    # Adapter directory (preferred).
+    # 1. 适配 HuggingFace 标准的 Adapter 文件夹格式
     if os.path.isdir(ckpt_path) and os.path.exists(os.path.join(ckpt_path, "adapter_config.json")):
         print(f"[CKPT] Loading PEFT adapter from directory: {ckpt_path}")
-        if isinstance(model, PeftModel):
-            model.load_adapter(ckpt_path, adapter_name="sft", is_trainable=True)
-            model.set_adapter("sft")
-            return _build_ivtlr_wrapper(model, tokenizer, processor, model_path, cfg=cfg)
-        peft_model = PeftModel.from_pretrained(model, ckpt_path, is_trainable=True)
-        return _build_ivtlr_wrapper(peft_model, tokenizer, processor, model_path, cfg=cfg)
+        model = PeftModel.from_pretrained(model, ckpt_path, is_trainable=False)
+        print("[CKPT] Merging old adapter into base model...")
+        model = model.merge_and_unload()
+        
+        # 重新应用新的 LoRA 配置
+        if bool(cfg.get("use_lora", True)):
+            model = get_peft_model(model, _build_lora_config(cfg))
+        return _build_ivtlr_wrapper(model, tokenizer, processor, model_path, cfg=cfg)
 
-    # Full fp32 state dict from SFT (e.g. epoch_x_full_model_fp32.pth).
+    # 2. 适配通过 torch.save 导出的完整状态字典 (.pth)
     print(f"[CKPT] Loading full SFT state dict from: {ckpt_path}")
     payload = _load_checkpoint_payload(ckpt_path, cfg)
     source_sd = _strip_module_prefix(_extract_state_dict(payload))
     del payload
 
-    # If checkpoint carries LoRA/base_layer params, ensure model structure matches.
     has_lora = _checkpoint_has_lora_keys(source_sd)
-    if has_lora and not isinstance(model, PeftModel):
-        print(
-            "[CKPT] Detected LoRA/base_layer keys in checkpoint; "
-            "wrapping base model with PEFT before strict load."
+    
+    if has_lora:
+        # 从 state_dict 的张量形状中自动推断旧的 SFT LoRA Rank
+        old_r = 64  # 默认 fallback
+        for k, v in source_sd.items():
+            if "lora_A.weight" in k:
+                old_r = v.shape[0]
+                break
+        
+        # 重点注意：合并权重时，旧的 lora_alpha 必须准确，否则缩放系数不对。
+        # 如果你的 config 文件里没有配置 sft_lora_alpha，默认沿用当前的 lora_alpha 或 16。
+        old_alpha = cfg.get("sft_lora_alpha", cfg.get("lora_alpha", 16))
+        print(f"[CKPT] Detected LoRA keys. Auto-detected SFT Rank={old_r}, Alpha={old_alpha}")
+        
+        # 1. 使用旧的配置包装模型，用于精确加载 SFT 权重
+        old_lora_cfg = LoraConfig(
+            task_type="CAUSAL_LM",
+            target_modules=cfg.get("lora_target_modules", ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]),
+            r=old_r,
+            lora_alpha=old_alpha,
+            bias=cfg.get("lora_bias", "none"),
+            inference_mode=False,
         )
-        model = get_peft_model(model, _build_lora_config(cfg))
-
-    ivtlr_wrapper = _build_ivtlr_wrapper(model, tokenizer, processor, model_path, cfg=cfg)
-
-    # infer.py-style strict load.
-    incompatible = ivtlr_wrapper.load_state_dict(source_sd, strict=True)
-    print(
-        "[CKPT] Strict load succeeded: "
-        f"source_keys={len(source_sd)}, "
-        f"missing={len(incompatible.missing_keys)}, "
-        f"unexpected={len(incompatible.unexpected_keys)}"
-    )
-    return ivtlr_wrapper
-
-
+        model = get_peft_model(model, old_lora_cfg)
+        
+        # 包上 IVTLR 壳子，使网络层级字典与 checkpoint 完全对齐
+        ivtlr_wrapper = _build_ivtlr_wrapper(model, tokenizer, processor, model_path, cfg=cfg)
+        
+        # 2. 严格加载旧权重
+        incompatible = ivtlr_wrapper.load_state_dict(source_sd, strict=True)
+        print(f"[CKPT] Strict load succeeded. Missing keys: {len(incompatible.missing_keys)}")
+        
+        # 3. 核心步骤：将 SFT LoRA 权重融进 Base Model 线性层
+        print("[CKPT] Merging SFT LoRA weights into base model...")
+        ivtlr_wrapper.base_causallm = ivtlr_wrapper.base_causallm.merge_and_unload()
+        
+        # 4. 初始化新的 LoRA 配置用于 GRPO 训练
+        if bool(cfg.get("use_lora", True)):
+            new_lora_cfg = _build_lora_config(cfg)
+            print(f"[CKPT] Re-initializing new LoRA for GRPO (Target Rank={new_lora_cfg.r})")
+            ivtlr_wrapper.base_causallm = get_peft_model(ivtlr_wrapper.base_causallm, new_lora_cfg)
+            ivtlr_wrapper.base_causallm.print_trainable_parameters()
+            
+        return ivtlr_wrapper
+        
+    else:
+        # 如果原始的 Checkpoint 是全参微调的，没有 LoRA 键值
+        ivtlr_wrapper = _build_ivtlr_wrapper(model, tokenizer, processor, model_path, cfg=cfg)
+        incompatible = ivtlr_wrapper.load_state_dict(source_sd, strict=True)
+        print(f"[CKPT] Strict load succeeded (Full Params). Missing keys: {len(incompatible.missing_keys)}")
+        
+        if bool(cfg.get("use_lora", True)):
+            new_lora_cfg = _build_lora_config(cfg)
+            print(f"[CKPT] Initializing new LoRA for GRPO (Target Rank={new_lora_cfg.r})")
+            ivtlr_wrapper.base_causallm = get_peft_model(ivtlr_wrapper.base_causallm, new_lora_cfg)
+            ivtlr_wrapper.base_causallm.print_trainable_parameters()
+            
+        return ivtlr_wrapper
 
 def _to_supported_kwargs(callable_obj, kwargs: Dict[str, Any]) -> Dict[str, Any]:
     sig = inspect.signature(callable_obj)
@@ -1185,10 +1274,10 @@ def main():
     if gradient_checkpointing_enabled:
         model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
 
-    if bool(cfg.get("use_lora", True)):
-        lora_cfg = _build_lora_config(cfg)
-        model = get_peft_model(model, lora_cfg)
-        model.print_trainable_parameters()
+    # if bool(cfg.get("use_lora", True)):
+    #     lora_cfg = _build_lora_config(cfg)
+    #     model = get_peft_model(model, lora_cfg)
+    #     model.print_trainable_parameters()
 
     model = _load_sft_checkpoint_into_model(model, tokenizer, processor, cfg, model_path)
     model = _make_ivtlr_trl_compatible(model, cfg)
