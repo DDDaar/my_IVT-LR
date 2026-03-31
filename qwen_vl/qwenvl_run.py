@@ -633,7 +633,7 @@ def process_m3cot_example(example,processor):
     messages = [{
         "role": "user",
         "content": [
-            {"type": "image", "image": example["image"], "resized_height": 280, "resized_width": 280},
+            {"type": "image", "image": example["image"], "resized_height": 560, "resized_width": 560},
             {"type": "text", "text": example["question"]}
         ]
     }]
@@ -720,7 +720,7 @@ def process_sqa_example(example,processor):
         "role": "user",
         "content": [
             # 保持与 M3CoT 一致的 resize 策略，或者根据显存情况去掉 resize
-            {"type": "image", "image": example["image"], "resized_height": 280, "resized_width": 280},
+            {"type": "image", "image": example["image"], "resized_height": 560, "resized_width": 560},
             {"type": "text", "text": example["question"]}
         ]
     }]
