@@ -32,7 +32,7 @@ class IVTLR(nn.Module):
         image_token_id,
         visual_start_id,
         visual_end_id,
-        num_selected_patches: int = 8,
+        num_selected_patches: int = 128,
         model_path: str = None,  # [新增参数]
     ):
 
@@ -242,7 +242,9 @@ class IVTLR(nn.Module):
                 raise ValueError(
                     f"Image features and image tokens do not match: tokens: {n_image_tokens}, features {image_embeds.shape[0]}"
                 )
-            print(f'当前序列中，图像 token 有{n_image_tokens}个')
+                
+            #print(f'当前序列中，图像 token 有{n_image_tokens}个')
+            
             # 图像部分掩码
             image_mask_init = (input_ids == self.image_token_id)  # (B, orig_S)
             # 假设D=768，则expand_mask形状为(B, S, 768)，每个图像token位置的所有768维都是True
