@@ -91,7 +91,7 @@ def load_inference_model(checkpoint_path, model_base_path, num_selected_patches=
     if any(k.startswith("module.") for k in state_dict.keys()):
         state_dict = {k.replace("module.", ""): v for k, v in state_dict.items()}
     
-    model.load_state_dict(state_dict, strict=True)
+    model.load_state_dict(state_dict, strict=False)
     # print(model) # 保持输出简洁，注释掉
     print("Successfully load model")
     
