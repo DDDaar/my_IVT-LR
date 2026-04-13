@@ -47,6 +47,9 @@ class IVTLR(nn.Module):
         self.visual_start_id = visual_start_id
         self.visual_end_id = visual_end_id
         self.num_selected_patches = num_selected_patches
+        # Trace is disabled by default to keep original behavior unchanged.
+        self.enable_trace = False
+        self.last_trace = []
         print(f'选择了{num_selected_patches}个 patch')
 
         # tested with GPT2 and Llama3
@@ -288,6 +291,7 @@ class IVTLR(nn.Module):
 
         #外层循环：多轮潜变量处理
         if max_n_latents > 0:
+            #print(f'max_n_latents={max_n_latents}')
             # 对k个latent token依次处理
             for pass_idx in range(max_n_latents):
                 #初始化每轮的变量，从头开始
@@ -360,6 +364,26 @@ class IVTLR(nn.Module):
                     #选择图像token中的topk个
                     topk_rel = rel_scores.topk(self.num_selected_patches, sorted=False)[1]  # rel idx
                     abs_idxs = (vs + 1) + topk_rel
+                    if self.enable_trace:
+                        topk_scores = rel_scores[topk_rel]
+                        grid_thw_b = None
+                        if image_grid_thw is not None:
+                            grid_row = image_grid_thw[b]
+                            if torch.is_tensor(grid_row):
+                                grid_thw_b = [int(x) for x in grid_row.detach().cpu().tolist()]
+                        self.last_trace.append(
+                            {
+                                "pass_idx": int(pass_idx),
+                                "batch_idx": int(b),
+                                "vs": int(vs),
+                                "ve": int(ve),
+                                "rel_len": int(rel_scores.numel()),
+                                "topk_rel": [int(x) for x in topk_rel.detach().cpu().tolist()],
+                                "topk_abs": [int(x) for x in abs_idxs.detach().cpu().tolist()],
+                                "topk_scores": [float(x) for x in topk_scores.detach().float().cpu().tolist()],
+                                "grid_thw": grid_thw_b,
+                            }
+                        )
                     logging.debug(f"topk_rel: {topk_rel}")
                     logging.debug(f"abs idx: {abs_idxs}")
                     image_mask[b, abs_idxs] = False
@@ -930,6 +954,8 @@ class IVTLR(nn.Module):
     ):
         self.gen_forward_cnt = 0
         eos_pos = None
+        if self.enable_trace:
+            self.last_trace = []
 
         assert input_ids.shape[0] == 1, "only support batch_size == 1 now"
 
