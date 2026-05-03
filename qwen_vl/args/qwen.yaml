@@ -3,13 +3,13 @@ save_path: /home/ma-user/work/lbx/IVT-LR/qwen_vl/output
 name: m3cot_qwen2vl_IVTLR
 
 # 添加数据集控制字段
-dataset_name: scienceqa # 选项: 'scienceqa' 或 'scienceqa'
+dataset_name: m3cot # 选项: 'scienceqa' 或 'scienceqa'
 # --- [新增配置] ---
 model_type: "2B"  # 选项: "2B" 或 "7B"
 model_path_2b: "/home/ma-user/work/lbx/models/Qwen2-VL-2B-Instruct" # 请修改为实际2B模型路径
 model_path_7b: "/home/ma-user/work/lbx/models/Qwen2-VL-7B-Instruct" # 请修改为实际7B模型路径
 # suffix: '_modify_2plus_head_and_layer_gate'
-suffix: 'choose_8_topk_560_mogai2(hiddenstate_head_fusion)'
+suffix: 'choose_32_topk_560_1_1_0_jiaquan'
 
 # -----------------
 # 尝试一下纯cot
@@ -26,6 +26,22 @@ bf16: True
 batch_size_training: 2
 
 debug: False
+nums_data: -1
 gradient_accumulation_steps: 8
 num_epochs: 16
 lr: !!float "4e-5"
+
+# IVTLR top-k scoring (backward-compatible defaults)
+use_head_gate: false
+candidate_pool_ratio: 2.0
+candidate_pool_max: 128
+w_attn: 1.0
+w_grad: 1.0
+w_delta: 0.0
+score_norm: minmax
+grad_norm_type: l2
+grad_probe_mode: answer_option
+delta_probe_tokens: 8
+delta_mask_mode: zero
+delta_topm_cap: 24
+fallback_to_attn_when_invalid: true

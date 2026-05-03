@@ -25,7 +25,7 @@
 # from transformers.models.gpt2.modeling_gpt2 import GPT2Block
 # from transformers import Qwen2VLForConditionalGeneration, AutoTokenizer, AutoProcessor
 # from qwen_vl_utils import process_vision_info
-# from datasets import load_dataset
+# from datasets import load_dataset, load_from_disk
 # import logging
 # logging.basicConfig(
 #     filename='qwenvl4.log',  
@@ -544,7 +544,7 @@ from transformers.models.llama.modeling_llama import LlamaDecoderLayer
 from transformers.models.gpt2.modeling_gpt2 import GPT2Block
 from transformers import Qwen2VLForConditionalGeneration, AutoTokenizer, AutoProcessor
 from qwen_vl_utils import process_vision_info
-from datasets import load_dataset
+from datasets import load_dataset, load_from_disk
 import logging
 logging.basicConfig(
     filename='qwenvl4.log',  
@@ -890,7 +890,30 @@ def main():
     
     model.print_trainable_parameters()
 
-    model = IVTLR(model, latent_id, start_id, end_id, tokenizer.eos_token_id, image_token_id, visual_start_id, visual_end_id,model_path=model_path)
+    model = IVTLR(
+        model,
+        latent_id,
+        start_id,
+        end_id,
+        tokenizer.eos_token_id,
+        image_token_id,
+        visual_start_id,
+        visual_end_id,
+        model_path=model_path,
+        use_head_gate=getattr(configs, "use_head_gate", False),
+        candidate_pool_ratio=getattr(configs, "candidate_pool_ratio", 1.0),
+        candidate_pool_max=getattr(configs, "candidate_pool_max", 64),
+        w_attn=getattr(configs, "w_attn", 1.0),
+        w_grad=getattr(configs, "w_grad", 0.0),
+        w_delta=getattr(configs, "w_delta", 0.0),
+        score_norm=getattr(configs, "score_norm", "minmax"),
+        grad_norm_type=getattr(configs, "grad_norm_type", "l2"),
+        grad_probe_mode=getattr(configs, "grad_probe_mode", "answer_option"),
+        delta_probe_tokens=getattr(configs, "delta_probe_tokens", 8),
+        delta_mask_mode=getattr(configs, "delta_mask_mode", "zero"),
+        delta_topm_cap=getattr(configs, "delta_topm_cap", 24),
+        fallback_to_attn_when_invalid=getattr(configs, "fallback_to_attn_when_invalid", True),
+    )
 
     # deepspeed包装模型
     print(f"Running Deepspeed on rank = {rank}, world size = {world_size}")
@@ -909,53 +932,97 @@ def main():
     del model
 
 
-    # 数据集加载
-    # --- Dataset Loading Logic Modified ---
+    # 数据集加载（分布式仅预处理一次：rank0 处理并缓存，其余 rank 直接加载）
     print("start dataset")
     dataset_name = getattr(configs, "dataset_name", "m3cot") # 默认为 m3cot 以兼容旧配置
     print(f"Loading dataset: {dataset_name}")
 
-    # 处理 train 数据集
-    print("start dataset")
-    
+    nums_data = int(getattr(configs, "nums_data", -1))
+    if nums_data == 0 or nums_data < -1:
+        raise ValueError(f"nums_data must be -1 or a positive integer, got {nums_data}")
 
-    if dataset_name == "scienceqa":
-        dataset = load_dataset("derek-thomas/ScienceQA")
-        
-        def has_image(example):
-            return "image" in example and example["image"] is not None
-        
-        # 选取部分数据用于调试或全量
-        if configs.debug:
-            train_dataset = dataset["train"].select(range(20)).filter(has_image)
+    dataset_cache_root = os.path.join(save_dir, "dataset_cache")
+    os.makedirs(dataset_cache_root, exist_ok=True)
+    cache_name = f"train_{dataset_name}_model{target_model_type}_nums{nums_data}_debug{int(bool(configs.debug))}"
+    dataset_cache_dir = os.path.join(dataset_cache_root, cache_name)
+
+    if rank == 0:
+        print(f"[rank0] building dataset cache: {dataset_cache_dir}")
+
+        if dataset_name == "scienceqa":
+            dataset = load_dataset("derek-thomas/ScienceQA")
+
+            def has_image(example):
+                return "image" in example and example["image"] is not None
+
+            raw_train = dataset["train"]
+            if configs.debug:
+                pre_limit = min(20, len(raw_train))
+                raw_train = raw_train.select(range(pre_limit))
+                print(f"debug=True, pre-limit raw train to {pre_limit} samples before filter/map")
+            elif nums_data != -1:
+                pre_limit = min(nums_data, len(raw_train))
+                raw_train = raw_train.select(range(pre_limit))
+                print(f"nums_data={nums_data}, pre-limit raw train to {pre_limit} samples before filter/map")
+
+            train_dataset = raw_train.filter(has_image)
+            if nums_data != -1:
+                limit_n = min(nums_data, len(train_dataset))
+                train_dataset = train_dataset.select(range(limit_n))
+
+            process_func = functools.partial(process_sqa_example, processor=processor)
+
+        elif dataset_name == "m3cot":
+            dataset = load_dataset("LightChen2333/M3CoT")
+
+            def has_image(example):
+                return "image" in example and example["image"] is not None
+
+            raw_train = dataset["train"]
+            if configs.debug:
+                pre_limit = min(20, len(raw_train))
+                raw_train = raw_train.select(range(pre_limit))
+                print(f"debug=True, pre-limit raw train to {pre_limit} samples before filter/map")
+            elif nums_data != -1:
+                pre_limit = min(nums_data, len(raw_train))
+                raw_train = raw_train.select(range(pre_limit))
+                print(f"nums_data={nums_data}, pre-limit raw train to {pre_limit} samples before filter/map")
+
+            train_dataset = raw_train.filter(has_image)
+            if nums_data != -1:
+                limit_n = min(nums_data, len(train_dataset))
+                train_dataset = train_dataset.select(range(limit_n))
+
+            process_func = functools.partial(process_m3cot_example, processor=processor)
+
         else:
-            train_dataset = dataset["train"].filter(has_image)
-            
-        # 使用 partial 传递 processor
-        process_func = functools.partial(process_sqa_example, processor=processor)
-        train_dataset = train_dataset.map(process_func, num_proc=32,)
-    
-    elif dataset_name == "m3cot":
-        dataset = load_dataset("LightChen2333/M3CoT")
-        
-        def has_image(example):
-            return "image" in example and example["image"] is not None
+            raise ValueError(f"Unknown dataset_name: {dataset_name}")
 
-        if configs.debug:
-            train_dataset = dataset["train"].select(range(20)).filter(has_image)
+        # 小数据自动降并行，避免 map 进程启动开销过大导致看似卡住。
+        map_num_proc = max(1, min(32, len(train_dataset)))
+        print(f"[rank0] map with num_proc={map_num_proc}, samples={len(train_dataset)}")
+        if map_num_proc == 1:
+            train_dataset = train_dataset.map(process_func)
         else:
-            train_dataset = dataset["train"].filter(has_image)
-            
-        process_func = functools.partial(process_m3cot_example, processor=processor)
-        train_dataset = train_dataset.map(process_func, num_proc=32)
-        
-    else:
-        raise ValueError(f"Unknown dataset_name: {dataset_name}")
+            train_dataset = train_dataset.map(process_func, num_proc=map_num_proc)
 
-        
+        if nums_data != -1:
+            print(f"nums_data={nums_data}, final usable samples after filter/map: {len(train_dataset)}")
+        else:
+            print(f"nums_data=-1, final usable samples after filter/map: {len(train_dataset)}")
 
+        if os.path.exists(dataset_cache_dir):
+            shutil.rmtree(dataset_cache_dir)
+        train_dataset.save_to_disk(dataset_cache_dir)
+        print(f"[rank0] dataset cache saved: {dataset_cache_dir}")
+
+    dist.barrier()
+    train_dataset = load_from_disk(dataset_cache_dir)
+    print(f"[rank{rank}] loaded dataset cache with {len(train_dataset)} samples")
+
+    max_size = nums_data if nums_data != -1 else (5000 if configs.debug else 100000000)
     base_dataset_train = get_dataset(
-        train_dataset, tokenizer, processor, max_size=5000 if configs.debug else 100000000
+        train_dataset, tokenizer, processor, max_size=max_size
     )
 
     total_train_steps = 0

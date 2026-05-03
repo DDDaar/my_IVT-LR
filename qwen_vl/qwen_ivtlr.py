@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 from torch.nn import CrossEntropyLoss
+import torch.nn.functional as F
 from collections import namedtuple
 from transformers.models.gpt2 import GPT2LMHeadModel
 from transformers import Qwen2VLForConditionalGeneration, AutoTokenizer, AutoProcessor
@@ -32,8 +33,21 @@ class IVTLR(nn.Module):
         image_token_id,
         visual_start_id,
         visual_end_id,
-        num_selected_patches: int = 8,
+        num_selected_patches: int = 32,
         model_path: str = None,  # [新增参数]
+        use_head_gate: bool = False,
+        candidate_pool_ratio: float = 1.0,
+        candidate_pool_max: int = 64,
+        w_attn: float = 1.0,
+        w_grad: float = 0.0,
+        w_delta: float = 0.0,
+        score_norm: str = "minmax",
+        grad_norm_type: str = "l2",
+        grad_probe_mode: str = "answer_option",
+        delta_probe_tokens: int = 8,
+        delta_mask_mode: str = "zero",
+        delta_topm_cap: int = 24,
+        fallback_to_attn_when_invalid: bool = True,
     ):
 
         super(IVTLR, self).__init__()
@@ -47,6 +61,19 @@ class IVTLR(nn.Module):
         self.visual_start_id = visual_start_id
         self.visual_end_id = visual_end_id
         self.num_selected_patches = num_selected_patches
+        self.use_head_gate = bool(use_head_gate)
+        self.candidate_pool_ratio = float(candidate_pool_ratio)
+        self.candidate_pool_max = int(candidate_pool_max)
+        self.w_attn = float(w_attn)
+        self.w_grad = float(w_grad)
+        self.w_delta = float(w_delta)
+        self.score_norm = str(score_norm).lower()
+        self.grad_norm_type = str(grad_norm_type).lower()
+        self.grad_probe_mode = str(grad_probe_mode).lower()
+        self.delta_probe_tokens = int(delta_probe_tokens)
+        self.delta_mask_mode = str(delta_mask_mode).lower()
+        self.delta_topm_cap = int(delta_topm_cap)
+        self.fallback_to_attn_when_invalid = bool(fallback_to_attn_when_invalid)
         # Trace is disabled by default to keep original behavior unchanged.
         self.enable_trace = False
         self.last_trace = []
@@ -92,27 +119,55 @@ class IVTLR(nn.Module):
 
 #         ####################################################################
         # #魔改2、3
-        #1. 获取 num_heads
-        # 大多数 HF 模型（Qwen2-VL, Chameleon, Llama）使用 .num_attention_heads
-        # GPT-2 使用 .n_head
-        if hasattr(self.base_causallm.config, "num_attention_heads"):
-            num_heads = self.base_causallm.config.num_attention_heads
-        elif hasattr(self.base_causallm.config, "n_head"):
-            num_heads = self.base_causallm.config.n_head
-        else:
-            raise ValueError("Cannot find number of attention heads in model config")
+        # 仅在 use_head_gate=True 时构建 gate，避免默认路径依赖特定 config 字段。
+        self.head_gate = None
+        if self.use_head_gate:
+            def _pick(cfg, names):
+                if cfg is None:
+                    return None
+                for n in names:
+                    if hasattr(cfg, n):
+                        v = getattr(cfg, n)
+                        if v is not None:
+                            return v
+                return None
 
+            cfgs = []
+            root_cfg = getattr(self.base_causallm, "config", None)
+            cfgs.append(root_cfg)
+            cfgs.append(getattr(root_cfg, "text_config", None))
 
-        if hasattr(self.base_causallm.config, "hidden_size"):
-            hidden_size = self.base_causallm.config.hidden_size
-        elif hasattr(self.base_causallm.config, "n_embd"):
-            hidden_size = self.base_causallm.config.n_embd
-            
-        
-        self.head_gate = nn.Sequential(
-            nn.Linear(hidden_size, num_heads), # 输入 latent hidden state，输出每个 head 的权重
-            nn.Softmax(dim=-1) # 保证权重和为 1
-        )
+            language_model = getattr(self.base_causallm, "language_model", None)
+            lm_cfg = getattr(language_model, "config", None)
+            cfgs.append(lm_cfg)
+            cfgs.append(getattr(lm_cfg, "text_config", None))
+
+            base_model = getattr(self.base_causallm, "base_model", None)
+            inner_model = getattr(base_model, "model", None)
+            inner_cfg = getattr(inner_model, "config", None)
+            cfgs.append(inner_cfg)
+            cfgs.append(getattr(inner_cfg, "text_config", None))
+
+            num_heads = None
+            hidden_size = None
+            for cfg in cfgs:
+                if num_heads is None:
+                    num_heads = _pick(cfg, ["num_attention_heads", "n_head"])
+                if hidden_size is None:
+                    hidden_size = _pick(cfg, ["hidden_size", "n_embd", "d_model"])
+                if num_heads is not None and hidden_size is not None:
+                    break
+
+            if num_heads is None or hidden_size is None:
+                raise ValueError(
+                    "Cannot find head-gate dims in model config. "
+                    "Please set use_head_gate=false or check model config fields."
+                )
+
+            self.head_gate = nn.Sequential(
+                nn.Linear(int(hidden_size), int(num_heads)), # 输入 latent hidden state，输出每个 head 的权重
+                nn.Softmax(dim=-1) # 保证权重和为 1
+            )
 #         ####################################################################
 
     
@@ -205,6 +260,227 @@ class IVTLR(nn.Module):
 #         ####################################################################
         
         
+    def _normalize_scores(self, x: torch.Tensor) -> torch.Tensor:
+        if x.numel() == 0:
+            return x
+        if self.score_norm == "zscore":
+            mu = x.mean()
+            sigma = x.std(unbiased=False)
+            if torch.isnan(sigma) or sigma <= 1e-8:
+                return torch.zeros_like(x)
+            return (x - mu) / (sigma + 1e-8)
+        if self.score_norm == "softmax":
+            return torch.softmax(x, dim=-1)
+        x_min = x.min()
+        x_max = x.max()
+        denom = x_max - x_min
+        if torch.isnan(denom) or denom <= 1e-8:
+            return torch.zeros_like(x)
+        return (x - x_min) / (denom + 1e-8)
+
+    def _get_probe_token_ids_from_labels(self, labels_row: torch.Tensor):
+        valid = labels_row[labels_row != -100]
+        if valid.numel() == 0:
+            return [int(self.eos_token_id)]
+
+        valid_list = [int(x) for x in valid.detach().cpu().tolist()]
+        tokenizer = self.processor.tokenizer
+        anchor = tokenizer.encode("Therefore, the answer is ", add_special_tokens=False)
+
+        answer_tokens = []
+        if anchor and len(valid_list) >= len(anchor) + 1:
+            for i in range(len(valid_list) - len(anchor)):
+                if valid_list[i : i + len(anchor)] == anchor:
+                    start = i + len(anchor)
+                    end = min(len(valid_list), start + max(1, self.delta_probe_tokens))
+                    answer_tokens = [int(x) for x in valid_list[start:end]]
+                    break
+
+        mode = self.grad_probe_mode
+        if mode == "answer_span" and answer_tokens:
+            probe_ids = answer_tokens
+        elif mode == "last_token":
+            probe_ids = [int(valid_list[-1])]
+        elif mode == "first_token":
+            probe_ids = [int(valid_list[0])]
+        else:
+            if answer_tokens:
+                probe_ids = [int(answer_tokens[0])]
+            else:
+                probe_ids = [int(valid_list[0])]
+
+        dedup = []
+        seen = set()
+        for tid in probe_ids:
+            if tid not in seen:
+                dedup.append(int(tid))
+                seen.add(int(tid))
+        return dedup if dedup else [int(self.eos_token_id)]
+
+    def _compute_grad_scores(
+        self,
+        logits_this: torch.Tensor,
+        inputs_embeds: torch.Tensor,
+        labels: torch.Tensor,
+        abs_cands: torch.Tensor,
+        b: int,
+        end: int,
+    ) -> torch.Tensor:
+        if abs_cands.numel() == 0:
+            return torch.zeros_like(abs_cands, dtype=inputs_embeds.dtype)
+
+        probe_ids = self._get_probe_token_ids_from_labels(labels[b])
+        probe_pos = max(0, min(end - 1, logits_this.size(1) - 1))
+        probe_terms = [logits_this[b, probe_pos, int(pid)] for pid in probe_ids]
+        probe_scalar = torch.stack(probe_terms).mean()
+        grad = torch.autograd.grad(
+            probe_scalar,
+            inputs_embeds,
+            retain_graph=True,
+            allow_unused=True,
+        )[0]
+        if grad is None:
+            return torch.zeros(abs_cands.numel(), device=inputs_embeds.device, dtype=inputs_embeds.dtype)
+
+        cand_grad = grad[b, abs_cands, :]
+        if self.grad_norm_type == "l1":
+            scores = cand_grad.abs().sum(dim=-1)
+        else:
+            scores = cand_grad.norm(p=2, dim=-1)
+        return scores.detach()
+
+    def _compute_delta_scores(
+        self,
+        inputs_embeds: torch.Tensor,
+        attention_mask: torch.Tensor,
+        position_ids: torch.Tensor,
+        pixel_values: torch.Tensor,
+        image_grid_thw: torch.Tensor,
+        logits_this: torch.Tensor,
+        labels: torch.Tensor,
+        abs_cands: torch.Tensor,
+        b: int,
+        end: int,
+    ) -> torch.Tensor:
+        if abs_cands.numel() == 0:
+            return torch.zeros_like(abs_cands, dtype=inputs_embeds.dtype)
+
+        probe_ids = self._get_probe_token_ids_from_labels(labels[b])
+        probe_pos = max(0, min(end - 1, logits_this.size(1) - 1))
+        probe_ids_t = torch.tensor(probe_ids, device=logits_this.device, dtype=torch.long)
+        base_logp = F.log_softmax(logits_this[b, probe_pos, :], dim=-1).index_select(0, probe_ids_t).mean().detach()
+
+        max_eval = min(abs_cands.numel(), max(0, self.delta_topm_cap))
+        scores = torch.zeros(abs_cands.numel(), device=inputs_embeds.device, dtype=inputs_embeds.dtype)
+        if max_eval == 0:
+            return scores
+
+        mean_vec = None
+        if self.delta_mask_mode == "mean":
+            mean_vec = inputs_embeds[b, :end, :].mean(dim=0, keepdim=True)
+
+        for i in range(max_eval):
+            abs_idx = int(abs_cands[i].item())
+            if abs_idx >= end:
+                continue
+
+            with torch.no_grad():
+                cf_embeds = inputs_embeds[b : b + 1, :end, :].detach().clone()
+                if self.delta_mask_mode == "mean" and mean_vec is not None:
+                    cf_embeds[0, abs_idx, :] = mean_vec[0]
+                else:
+                    cf_embeds[0, abs_idx, :] = 0.0
+
+                cf_outputs = self.base_causallm(
+                    inputs_embeds=cf_embeds,
+                    attention_mask=attention_mask[b : b + 1, :end],
+                    position_ids=position_ids[b : b + 1, :end],
+                    pixel_values=pixel_values[b : b + 1] if pixel_values is not None else None,
+                    image_grid_thw=image_grid_thw[b : b + 1] if image_grid_thw is not None else None,
+                    output_hidden_states=False,
+                    output_attentions=False,
+                    use_cache=False,
+                )
+                cf_logp = F.log_softmax(cf_outputs.logits[0, probe_pos, :], dim=-1).index_select(0, probe_ids_t).mean()
+                scores[i] = (base_logp - cf_logp).clamp_min(0.0)
+
+        return scores
+
+    def _fuse_and_select(
+        self,
+        rel_scores: torch.Tensor,
+        inputs_embeds: torch.Tensor,
+        attention_mask: torch.Tensor,
+        position_ids: torch.Tensor,
+        pixel_values: torch.Tensor,
+        image_grid_thw: torch.Tensor,
+        logits_this: torch.Tensor,
+        labels: torch.Tensor,
+        b: int,
+        end: int,
+        vs: int,
+    ):
+        k = int(self.num_selected_patches)
+        if rel_scores.numel() == 0 or k <= 0:
+            empty = torch.zeros(0, dtype=torch.long, device=rel_scores.device)
+            empty_f = torch.zeros(0, dtype=inputs_embeds.dtype, device=inputs_embeds.device)
+            return empty, empty, empty_f, empty_f, empty_f
+
+        k = min(k, rel_scores.numel())
+        cand_m = max(k, int(round(k * max(self.candidate_pool_ratio, 1.0))))
+        cand_m = min(cand_m, rel_scores.numel())
+        if int(self.candidate_pool_max) > 0:
+            cand_m = min(cand_m, int(self.candidate_pool_max))
+        cand_m = max(k, cand_m)
+
+        cand_attn_scores, cand_rel = rel_scores.topk(cand_m, sorted=False)
+        cand_abs = (vs + 1) + cand_rel
+
+        grad_scores = torch.zeros_like(cand_attn_scores)
+        if self.w_grad != 0.0:
+            grad_scores = self._compute_grad_scores(
+                logits_this=logits_this,
+                inputs_embeds=inputs_embeds,
+                labels=labels,
+                abs_cands=cand_abs,
+                b=b,
+                end=end,
+            )
+
+        delta_scores = torch.zeros_like(cand_attn_scores)
+        if self.w_delta != 0.0:
+            delta_scores = self._compute_delta_scores(
+                inputs_embeds=inputs_embeds,
+                attention_mask=attention_mask,
+                position_ids=position_ids,
+                pixel_values=pixel_values,
+                image_grid_thw=image_grid_thw,
+                logits_this=logits_this,
+                labels=labels,
+                abs_cands=cand_abs,
+                b=b,
+                end=end,
+            )
+
+        fused = (
+            self.w_attn * self._normalize_scores(cand_attn_scores)
+            + self.w_grad * self._normalize_scores(grad_scores)
+            + self.w_delta * self._normalize_scores(delta_scores)
+        )
+
+        invalid = torch.isnan(fused) | torch.isinf(fused)
+        if invalid.any():
+            if self.fallback_to_attn_when_invalid:
+                fused = cand_attn_scores
+            else:
+                fused = torch.where(invalid, torch.full_like(fused, float("-inf")), fused)
+
+        top_idx = fused.topk(k, sorted=False).indices
+        top_rel = cand_rel[top_idx]
+        top_abs = cand_abs[top_idx]
+        top_scores = fused[top_idx]
+        return top_rel, top_abs, top_scores, cand_attn_scores, grad_scores
+
     def forward(
         self,
         input_ids: torch.LongTensor,        # shape = (B, S)
@@ -462,49 +738,47 @@ class IVTLR(nn.Module):
                 # 在 forward 循环中修改 (约 175 行附近)
                 # hidden_states: (B, Seq_Len, Hidden_Size)
                 # 我们关注的是产生 Attention 的那个 Latent Token，即位置 end-1
-                current_latent_vector = hidden_states[:, end-1, :] # (B, Hidden_Size)
-                
-                # 生成动态权重 (B, Num_Heads)
-                dynamic_head_weights = self.head_gate(current_latent_vector) 
-                dynamic_head_weights = dynamic_head_weights.unsqueeze(-1).unsqueeze(-1) # (B, Num_Heads, 1, 1)
-                
-                # 开始融合
-                layer_fused_attns = []
-                for layer_attn in attentions:
-                    # layer_attn: (B, Num_Heads, S, S)
-                    # 我们只需要最后一行 (Latent Token 对其他 Token 的关注度)
-                    # 注意：原始代码取了 avg_attn[b, end-1]，我们在融合前就可以切片以节省显存，或者在融合后切片
-                    
-                    # 加权求和: Sum(Attention * Weight)
-                    # (B, Num_Heads, S, S) * (B, Num_Heads, 1, 1) -> Sum dim=1 -> (B, S, S)
-                    weighted_attn = (layer_attn * dynamic_head_weights).sum(dim=1)
-                    layer_fused_attns.append(weighted_attn)
-                
-                # 层间融合 (依然可以先用平均，或者参考方案二)
-                avg_attn = torch.stack(layer_fused_attns, dim=0).mean(dim=0)
-                current_seq_len = avg_attn.size(1)
+                # Selection path: raw attention top-k by default (forward-compatible),
+                # with optional head-gate weighted attention.
+                if self.use_head_gate:
+                    current_latent_vector = hidden_states[:, end - 1, :]  # (B, Hidden_Size)
+                    dynamic_head_weights = self.head_gate(current_latent_vector)
+                    dynamic_head_weights = dynamic_head_weights.unsqueeze(-1).unsqueeze(-1)
 
+                    layer_fused_attns = []
+                    for layer_attn in attentions:
+                        weighted_attn = (layer_attn * dynamic_head_weights).sum(dim=1)
+                        layer_fused_attns.append(weighted_attn)
+                    avg_attn = torch.stack(layer_fused_attns, dim=0).mean(dim=0)
+                else:
+                    avg_attn = torch.cat(attentions, dim=1).mean(dim=1)
+
+                current_seq_len = avg_attn.size(1)
                 select_image_embeds = []
 
                 for b in range(B):
-                    #最后一个位置的注意力图
-                    last_attn = avg_attn[b, end - 1]  # shape=(seq_len,)
+                    last_attn = avg_attn[b, end - 1]
                     vs, ve = vs_pos_per_batch[b], ve_pos_per_batch[b]
                     scores = last_attn.clone()
-                    
-                    allowed_positions = image_mask[b, :current_seq_len]  # shape=(S,)
+
+                    allowed_positions = image_mask[b, :current_seq_len]
                     invalid = ~allowed_positions
-                    #将非图像位置的分数设为负无穷，确保不会被选中
                     scores[invalid] = float("-inf")
 
-                    rel_scores = scores[vs+1 : ve]  # (image_len,)
-
-                    # 【核心修改点】同时保留 topk_scores，以此作为梯度的桥梁
-                    topk_scores, topk_rel = rel_scores.topk(self.num_selected_patches, sorted=False) 
-
-                    abs_idxs = (vs + 1) + topk_rel
-                    logging.debug(f"topk_rel: {topk_rel}")
-                    logging.debug(f"abs idx: {abs_idxs}")
+                    rel_scores = scores[vs + 1 : ve]
+                    topk_rel, abs_idxs, topk_scores, cand_attn_scores, cand_grad_scores = self._fuse_and_select(
+                        rel_scores=rel_scores,
+                        inputs_embeds=inputs_embeds,
+                        attention_mask=attention_mask,
+                        position_ids=position_ids,
+                        pixel_values=pixel_values,
+                        image_grid_thw=image_grid_thw,
+                        logits_this=logits_this,
+                        labels=labels,
+                        b=b,
+                        end=end,
+                        vs=vs,
+                    )
 
                     if self.enable_trace:
                         grid_thw_b = None
@@ -525,6 +799,8 @@ class IVTLR(nn.Module):
                             "topk_abs": [int(x) for x in abs_idxs.detach().cpu().tolist()],
                             "topk_scores": [float(x) for x in topk_scores.detach().float().cpu().tolist()],
                             "rel_scores": [float(x) for x in rel_scores.detach().float().cpu().tolist()],
+                            "candidate_attn_scores": [float(x) for x in cand_attn_scores.detach().float().cpu().tolist()],
+                            "candidate_grad_scores": [float(x) for x in cand_grad_scores.detach().float().cpu().tolist()],
                             "grid_thw": grid_thw_b,
                         }
 
@@ -546,7 +822,6 @@ class IVTLR(nn.Module):
                             raw_layer_rel_scores = []
                             for layer_idx in normalized_layers:
                                 layer_attn = attentions[layer_idx]
-                                # Raw layer attention: head-mean of the latent query row before gate weighting.
                                 layer_last_attn = layer_attn[b, :, end - 1].mean(dim=0)
                                 layer_scores = layer_last_attn.clone()
                                 layer_scores[invalid] = float("-inf")
@@ -562,245 +837,10 @@ class IVTLR(nn.Module):
                         self.last_trace.append(trace_payload)
 
                     image_mask[b, abs_idxs] = False
-
-                    # #提取对应位置的embedding
-                    # picked = inputs_embeds[b, abs_idxs, :]  # (K, D)
-                    # select_image_embeds.append(picked)
-
-                    
-                    # 6. 从原始 inputs_embeds 中提取对应的 patch 特征
-                    picked_embeds = inputs_embeds[b, abs_idxs, :]  # (K, D)
-                    # 7. 【使用直通估计器 (STE) 融合梯度】
-                    # 正向传播：ste_weight 为 1.0，picked 特征值保持不变
-                    # 反向传播：梯度将通过 topk_scores 流向 rel_scores -> last_attn -> head_gate
-                    # 梯度会以 $1 \times \text{gradient}$ 的大小，完好无损地传递给 topk_scores，进而流向产生这个分数的 rel_scores 和 head_gate
+                    picked_embeds = inputs_embeds[b, abs_idxs, :]
                     ste_weight = (topk_scores - topk_scores.detach() + 1.0).unsqueeze(-1)
                     picked = picked_embeds * ste_weight
-                    
                     select_image_embeds.append(picked)
-                
-# ################################################################################
-                
-
-    
-
-    
-    
-################################################################################
-# # 开始：逐层独立的 Head 门控融合，hiddenstate->head，魔改3
-                
-                # layer_fused_attns = []
-                
-                # for layer_idx, layer_attn in enumerate(attentions):
-                #     # 获取当前层【输入】的隐藏状态 (即上一层的输出) 作为当前层门控的输入
-                #     # 你也可以使用 all_hidden_states[layer_idx + 1] 作为当前层【输出】的隐藏状态
-                #     current_layer_latent = all_hidden_states[layer_idx][:, end-1, :] # (B, Hidden_Size)
-                    
-                #     # 使用当前层的隐藏状态，生成当前层专属的各个 Head 权重
-                #     dynamic_head_weights = self.head_gate(current_layer_latent) # (B, Num_Heads)
-                #     dynamic_head_weights = dynamic_head_weights.unsqueeze(-1).unsqueeze(-1) # (B, Num_Heads, 1, 1)
-                    
-                #     # 加权求和: Sum(Attention * Weight) -> (B, S, S)
-                #     weighted_attn = (layer_attn * dynamic_head_weights).sum(dim=1)
-                #     layer_fused_attns.append(weighted_attn)
-                
-                # #层间融合：依然使用最基础的平均方式
-                # avg_attn = torch.stack(layer_fused_attns, dim=0).mean(dim=0)
-                # current_seq_len = avg_attn.size(1)
-
-                # select_image_embeds = []
-
-                # for b in range(B):
-                #     #最后一个位置的注意力图
-                #     last_attn = avg_attn[b, end - 1]  # shape=(seq_len,)
-                #     vs, ve = vs_pos_per_batch[b], ve_pos_per_batch[b]
-                #     scores = last_attn.clone()
-                    
-                #     allowed_positions = image_mask[b, :current_seq_len]  # shape=(S,)
-                #     invalid = ~allowed_positions
-                #     #将非图像位置的分数设为负无穷，确保不会被选中
-                #     scores[invalid] = float("-inf")
-
-                #     rel_scores = scores[vs+1 : ve]  # (image_len,)
-                #     #选择图像token中的topk个
-                #     topk_rel = rel_scores.topk(self.num_selected_patches, sorted=False)[1]  # rel idx
-                #     abs_idxs = (vs + 1) + topk_rel
-                #     logging.debug(f"topk_rel: {topk_rel}")
-                #     logging.debug(f"abs idx: {abs_idxs}")
-                #     image_mask[b, abs_idxs] = False
-
-                #     #提取对应位置的embedding
-                #     picked = inputs_embeds[b, abs_idxs, :]  # (K, D)
-                #     select_image_embeds.append(picked)
-
-################################################################################
-#                 # =====================================================================
-#                 # 开始：使用可学习视觉选择器 (Cross-Attention) 选择 Top-K Patches
-#                 # =====================================================================
-                
-# # 1. 提取当前 Latent Token 的隐藏状态作为 Query -> (B, 1, D)
-#                 latent_hidden = hidden_states[:, end-1:end, :] 
-#                 q = self.visual_q_proj(latent_hidden) # (B, 1, embed_dim)
-
-#                 select_image_embeds = []
-
-#                 for b in range(B):
-#                     vs, ve = vs_pos_per_batch[b], ve_pos_per_batch[b]
-                    
-#                     # === 【修复点】：切片获取当前样本 b 的 Query ===
-#                     q_b = q[b:b+1, :, :] # (1, 1, embed_dim)
-                    
-#                     # 2. 提取当前图片所有 Patch 的隐藏状态作为 Key -> (1, num_patches, D)
-#                     image_hidden = hidden_states[b:b+1, vs+1:ve, :] 
-#                     k = self.visual_k_proj(image_hidden) # (1, num_patches, embed_dim)
-                    
-#                     # === 【修复点】：使用 q_b 计算，并用 [0, 0] 安全降维 ===
-#                     # q_b: (1, 1, embed_dim) | k.transpose: (1, embed_dim, num_patches)
-#                     # bmm 结果为 (1, 1, num_patches)，取 [0, 0] 后变为一维的 (num_patches,)
-#                     scores = torch.bmm(q_b, k.transpose(1, 2))[0, 0] / self.temperature
-                    
-#                     # 4. 屏蔽已经被之前的 Latent 选择过的 Patch
-#                     allowed_positions = image_mask[b, vs+1:ve]
-#                     scores[~allowed_positions] = float("-inf")
-
-#                     # === 增加：将 Score 转为概率分布，建立梯度图 ===
-#                     probs = torch.softmax(scores, dim=-1)
-
-#                     # 5. 取 Top-K 及其对应的概率
-#                     topk_probs, topk_rel = probs.topk(self.num_selected_patches, sorted=False)
-#                     abs_idxs = (vs + 1) + topk_rel
-                    
-#                     logging.debug(f"topk_rel: {topk_rel}")
-#                     logging.debug(f"abs idx: {abs_idxs}")
-                    
-#                     image_mask[b, abs_idxs] = False
-                    
-#                     # 6. 从原始 inputs_embeds 中提取对应的 patch 进行拼接
-#                     picked_embeds = inputs_embeds[b, abs_idxs, :]  # (K, D)
-                    
-#                     # === 增加：使用直通估计器 (STE) 融合梯度 ===
-#                     # 正向传播时相当于 picked_embeds * 1.0，特征大小不变
-#                     # 反向传播时，梯度会流向 topk_probs，从而更新 q_proj 和 k_proj
-#                     ste_weight = (topk_probs - topk_probs.detach() + 1.0).unsqueeze(-1)
-#                     picked = picked_embeds * ste_weight
-                    
-#                     select_image_embeds.append(picked)
-
-#                 # =====================================================================
-#                 # 结束：选择完毕，后面拼接 inputs_embeds_detached 等逻辑保持原有不变
-#                 # =====================================================================
-################################################################################
-
-
-
-###################################################################### 
-#                 #   魔改5，直接融合成新的视觉特征，而不是复用输入的embedding
-#                 #   Top-K
-#                 avg_attn = torch.cat(attentions, dim=1).mean(dim=1)  # (B, seq_len) 将所有层的注意力矩阵在 heads（头）维度上拼接，(B, L * heads, seq_len, seq_len)---->(B, seq_len, seq_len)
-#                 current_seq_len = avg_attn.size(1) #seq长度
-
-#                 select_image_embeds = []
-
-#                 for b in range(B):
-#                     #最后一个位置的注意力图
-#                     last_attn = avg_attn[b, end - 1]  # shape=(seq_len,)
-#                     vs, ve = vs_pos_per_batch[b], ve_pos_per_batch[b]
-                    
-#                     # 1. 提取当前图像的所有深层隐藏状态作为 Key 和 Value
-#                     image_hidden = hidden_states[b:b+1, vs+1:ve, :] # (1, num_patches, D)
-
-#                     # 2. 将当前 Latent Token 的状态加到可学习的 Query 上，融入当前的“思考上下文”
-#                     current_latent = hidden_states[b:b+1, end-1:end, :] # (1, 1, D)
-#                     q = self.visual_queries + current_latent # (1, K, D)
-
-#                     # 3. 通过 Cross-Attention 软提取图像特征
-#                     # 这样不仅可微，而且模型学会了"该看哪里就融合哪里"，完全不需要 STE
-#                     fused_visual_tokens, _ = self.cross_attn(query=q, key=image_hidden, value=image_hidden)
-
-#                     # 4. 经过一个 MLP 并作为选出的图像 Embeddings
-#                     picked = self.visual_proj(fused_visual_tokens).squeeze(0) # (K, D)
-#                     select_image_embeds.append(picked)
-
-#                     # 注意：使用这种方法，你不需要再去修改 image_mask 将选过的位置设为 False，
-#                     # 因为每次都是对全局图像基于当前 Latent 进行条件查询。
-#                     #截止到'避免梯度传播'前面
-                    
-######################################################################
-                
-    
-    
-    ################################################################################
-# # 使用hiddenstate->head、hiddenstate->layer提取各个head的权重进行加权求和，魔改2plus
-#                 # 在 forward 循环中修改 (约 175 行附近)
-#                 # hidden_states: (B, Seq_Len, Hidden_Size)
-#                 # 我们关注的是产生 Attention 的那个 Latent Token，即位置 end-1
-#                 current_latent_vector = hidden_states[:, end-1, :] # (B, Hidden_Size)
-                
-#                 # 生成动态权重 (B, Num_Heads)
-#                 dynamic_head_weights = self.head_gate(current_latent_vector) 
-#                 dynamic_head_weights = dynamic_head_weights.unsqueeze(-1).unsqueeze(-1) # (B, Num_Heads, 1, 1)
-                
-#                 # 开始融合
-#                 layer_fused_attns = []
-#                 for layer_attn in attentions:
-#                     # layer_attn: (B, Num_Heads, S, S)
-#                     # 我们只需要最后一行 (Latent Token 对其他 Token 的关注度)
-#                     # 注意：原始代码取了 avg_attn[b, end-1]，我们在融合前就可以切片以节省显存，或者在融合后切片
-                    
-#                     # 加权求和: Sum(Attention * Weight)
-#                     # (B, Num_Heads, S, S) * (B, Num_Heads, 1, 1) -> Sum dim=1 -> (B, S, S)
-#                     weighted_attn = (layer_attn * dynamic_head_weights).sum(dim=1)
-#                     layer_fused_attns.append(weighted_attn)
-                
-#                 # 层间融合 (依然可以先用平均，或者参考方案二)
-                
-#                   # 改为（层权重也由 latent hidden state 动态生成）
-#                 layer_weights = self.layer_gate(current_latent_vector)          # (B, num_layers)
-#                 stacked = torch.stack(layer_fused_attns, dim=1)                 # (B, num_layers, S, S)
-#                 avg_attn = (stacked * layer_weights.unsqueeze(-1).unsqueeze(-1)).sum(dim=1)  # (B, S, S)
-
-#                 current_seq_len = avg_attn.size(1)
-
-#                 select_image_embeds = []
-
-#                 for b in range(B):
-#                     #最后一个位置的注意力图
-#                     last_attn = avg_attn[b, end - 1]  # shape=(seq_len,)
-#                     vs, ve = vs_pos_per_batch[b], ve_pos_per_batch[b]
-#                     scores = last_attn.clone()
-                    
-#                     allowed_positions = image_mask[b, :current_seq_len]  # shape=(S,)
-#                     invalid = ~allowed_positions
-#                     #将非图像位置的分数设为负无穷，确保不会被选中
-#                     scores[invalid] = float("-inf")
-
-#                     rel_scores = scores[vs+1 : ve]  # (image_len,)
-
-#                     # 【核心修改点】同时保留 topk_scores，以此作为梯度的桥梁
-#                     topk_scores, topk_rel = rel_scores.topk(self.num_selected_patches, sorted=False) 
-
-#                     abs_idxs = (vs + 1) + topk_rel
-#                     logging.debug(f"topk_rel: {topk_rel}")
-#                     logging.debug(f"abs idx: {abs_idxs}")
-#                     image_mask[b, abs_idxs] = False
-
-#                     # #提取对应位置的embedding
-#                     # picked = inputs_embeds[b, abs_idxs, :]  # (K, D)
-#                     # select_image_embeds.append(picked)
-
-                    
-#                     # 6. 从原始 inputs_embeds 中提取对应的 patch 特征
-#                     picked_embeds = inputs_embeds[b, abs_idxs, :]  # (K, D)
-#                     # 7. 【使用直通估计器 (STE) 融合梯度】
-#                     # 正向传播：ste_weight 为 1.0，picked 特征值保持不变
-#                     # 反向传播：梯度将通过 topk_scores 流向 rel_scores -> last_attn -> head_gate
-#                     # 梯度会以 $1 \times \text{gradient}$ 的大小，完好无损地传递给 topk_scores，进而流向产生这个分数的 rel_scores 和 head_gate
-#                     ste_weight = (topk_scores - topk_scores.detach() + 1.0).unsqueeze(-1)
-#                     picked = picked_embeds * ste_weight
-                    
-#                     select_image_embeds.append(picked)
-                
-# ################################################################################
 
                 #避免梯度传播
                 select_image_embeds = torch.stack(select_image_embeds, dim=0)  # (B, K, D)
