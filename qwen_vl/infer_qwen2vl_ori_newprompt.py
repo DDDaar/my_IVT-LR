@@ -9,6 +9,7 @@ import json
 import os
 import time
 import argparse
+from collections import defaultdict
 
 # 设置日志
 logging.basicConfig(
@@ -84,6 +85,70 @@ def extract_answer_universal(text):
 
     return "FAILED"
 
+def normalize_vstar_label(label):
+    if isinstance(label, int):
+        if label < 0:
+            return ""
+        return chr(ord("A") + label)
+    if isinstance(label, str):
+        value = label.strip().upper()
+        if not value:
+            return ""
+        if len(value) == 1 and "A" <= value <= "Z":
+            return value
+        digit_match = re.search(r"\d+", value)
+        if digit_match:
+            idx = int(digit_match.group(0))
+            if idx >= 0:
+                return chr(ord("A") + idx)
+        letter_match = re.search(r"[A-Z]", value)
+        if letter_match:
+            return letter_match.group(0)
+    return ""
+
+def extract_option_set_from_text(text):
+    if not isinstance(text, str):
+        return None
+    patterns = [
+        r"^\s*\(?([A-Z])\)\s+",
+        r"^\s*([A-Z])[\.\:]\s+",
+        r"\n\s*\(?([A-Z])\)\s+",
+        r"\n\s*([A-Z])[\.\:]\s+",
+    ]
+    options = set()
+    for pattern in patterns:
+        for match in re.finditer(pattern, text, re.MULTILINE):
+            options.add(match.group(1).upper())
+    if options:
+        return options
+    return None
+
+def extract_answer_vstar(text, valid_options=None):
+    if not isinstance(text, str):
+        return "FAILED"
+    allowed = valid_options if valid_options else {chr(ord("A") + i) for i in range(10)}
+    allowed = set(x.upper() for x in allowed)
+
+    patterns = [
+        r"(?:final\s+answer|the\s+answer\s+is|answer)\s*[:：]?\s*\(?([A-Z])\)?",
+        r"(?:option|choice)\s*[:：]?\s*\(?([A-Z])\)?",
+    ]
+
+    matches = []
+    for pattern in patterns:
+        for m in re.finditer(pattern, text, re.IGNORECASE):
+            letter = m.group(1).upper()
+            if letter in allowed:
+                matches.append(letter)
+    if matches:
+        return matches[-1]
+
+    fallback_tokens = re.findall(r"\b([A-Z])\b", text.upper())
+    for token in reversed(fallback_tokens):
+        if token in allowed:
+            return token
+    return "FAILED"
+
 # ================= M3CoT 数据处理 =================
 
 def format_prompt_m3cot(example):
@@ -155,17 +220,47 @@ def process_func_sqa(example, idx):
         "dataset": "scienceqa"
     }
 
+def format_prompt_vstar_bench(example):
+    prompt = example.get("text", "")
+    if not isinstance(prompt, str):
+        prompt = str(prompt)
+    prompt = prompt.strip()
+    if not re.search(r"answer\s*[:：]?\s*$", prompt, re.IGNORECASE):
+        prompt += "\nAt the end of your response, output the final choice specifically in this format: Answer: X"
+
+    answer = normalize_vstar_label(example.get("label", ""))
+    image = example.get("image")
+    category = example.get("category", "unknown")
+    question_id = example.get("question_id", "")
+    valid_options = extract_option_set_from_text(example.get("text", ""))
+    return prompt, answer, image, category, question_id, valid_options
+
+def process_func_vstar(example, idx):
+    prompt, answer, image, category, question_id, valid_options = format_prompt_vstar_bench(example)
+    sample_id = question_id if question_id != "" else str(idx)
+    return {
+        "question_raw": prompt,
+        "image_raw": image,
+        "gt_answer": answer,
+        "id": sample_id,
+        "dataset": "vstar_bench",
+        "category": category,
+        "question_id": question_id,
+        "valid_options": sorted(list(valid_options)) if valid_options else None,
+    }
+
 # ================= 通用评测逻辑 =================
 
 def evaluate_dataset(dataset_name, eval_dataset, model, processor, output_file):
     print(f"\n{'='*40}")
     print(f"Starting evaluation for {dataset_name} (Size: {len(eval_dataset)})")
     print(f"{'='*40}")
-    
+
     correct = 0
     total = 0
     total_generate_time = 0.0
-    
+    category_stats = defaultdict(lambda: {"correct": 0, "total": 0})
+
     # 清空或创建文件
     with open(output_file, "w", encoding="utf-8") as f:
         pass
@@ -173,7 +268,7 @@ def evaluate_dataset(dataset_name, eval_dataset, model, processor, output_file):
     for i, ex in enumerate(eval_dataset):
         try:
             input_text = ex["question_raw"]
-            
+
             messages = [{
                 "role": "user",
                 "content": [
@@ -181,10 +276,10 @@ def evaluate_dataset(dataset_name, eval_dataset, model, processor, output_file):
                     {"type": "text", "text": input_text}
                 ]
             }]
-            
+
             text = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
             image_inputs, video_inputs = process_vision_info(messages)
-            
+
             inputs = processor(
                 text=[text],
                 images=image_inputs,
@@ -192,39 +287,46 @@ def evaluate_dataset(dataset_name, eval_dataset, model, processor, output_file):
                 padding=True,
                 return_tensors="pt"
             ).to(device)
-            
+
             prompt_length = inputs["input_ids"].shape[1]
             generate_start_time = time.time()
-            
+
             with torch.no_grad():
                 outputs = model.generate(
                     **inputs,
                     max_new_tokens=512
                 )
-                
+
             generate_end_time = time.time()
             total_generate_time += (generate_end_time - generate_start_time)
-            
+
             generated_tokens = outputs[0, prompt_length:]
             output_full_text = processor.decode(outputs[0], skip_special_tokens=True)
             new_generated_text = processor.decode(generated_tokens, skip_special_tokens=True)
-            
+
             logging.debug(f"[{dataset_name} ID:{ex['id']}] Generated: {new_generated_text}")
-            
+
             gt_answer = ex["gt_answer"]
-            
-            # 【修改点】: 使用统一的提取函数
-            pred_answer = extract_answer_universal(new_generated_text)
-            
-            # 比对
+            if dataset_name == "vstar_bench":
+                valid_options = set(ex["valid_options"]) if ex.get("valid_options") else None
+                pred_answer = extract_answer_vstar(new_generated_text, valid_options=valid_options)
+            else:
+                pred_answer = extract_answer_universal(new_generated_text)
+
             is_correct = (pred_answer == gt_answer)
             if is_correct:
                 correct += 1
             total += 1
-            
+
+            if dataset_name == "vstar_bench":
+                category = ex.get("category", "unknown")
+                category_stats[category]["total"] += 1
+                if is_correct:
+                    category_stats[category]["correct"] += 1
+
             if total % 10 == 0:
                 print(f"[{dataset_name}] Processed {total}/{len(eval_dataset)}. Acc: {correct/total:.2%}")
-            
+
             result = {
                 "id": ex["id"],
                 "gt_answer": gt_answer,
@@ -233,10 +335,13 @@ def evaluate_dataset(dataset_name, eval_dataset, model, processor, output_file):
                 "generated_text": new_generated_text,
                 "full_output": output_full_text
             }
-            
+            if dataset_name == "vstar_bench":
+                result["category"] = ex.get("category", "unknown")
+                result["question_id"] = ex.get("question_id", "")
+
             with open(output_file, "a", encoding="utf-8") as f_out:
                 f_out.write(json.dumps(result, ensure_ascii=False) + "\n")
-                
+
         except Exception as e:
             logging.error(f"Error processing sample {ex.get('id', 'unknown')}: {str(e)}")
             print(f"Error on sample {ex.get('id', 'unknown')}: {e}")
@@ -249,13 +354,21 @@ def evaluate_dataset(dataset_name, eval_dataset, model, processor, output_file):
         print(f"  Accuracy: {acc:.2%} ({correct}/{total})")
         print(f"  Avg Time: {avg_time:.4f}s")
         print(f"  Results saved to: {output_file}")
+
+        if dataset_name == "vstar_bench":
+            print("  Category Accuracy:")
+            for category in sorted(category_stats.keys()):
+                c_total = category_stats[category]["total"]
+                c_correct = category_stats[category]["correct"]
+                c_acc = c_correct / c_total if c_total > 0 else 0.0
+                print(f"    - {category}: {c_acc:.2%} ({c_correct}/{c_total})")
     else:
         print(f"[{dataset_name}] No samples processed.")
 
 def main():
-    parser = argparse.ArgumentParser(description="Evaluate original Qwen2-VL on M3CoT and ScienceQA")
+    parser = argparse.ArgumentParser(description="Evaluate original Qwen2-VL on M3CoT, ScienceQA and VSTAR-Bench")
     parser.add_argument("--model_path", type=str, default="/home/ma-user/work/lbx/models/Qwen2-VL-7B-Instruct", help="Path to the model")
-    parser.add_argument("--dataset", type=str, default="all", choices=["m3cot", "scienceqa", "all"], help="Dataset to evaluate")
+    parser.add_argument("--dataset", type=str, default="all", choices=["m3cot", "scienceqa", "vstar_bench", "all"], help="Dataset to evaluate")
     parser.add_argument("--output_dir", type=str, default="output_ori", help="Output directory")
     args = parser.parse_args()
 
@@ -299,6 +412,27 @@ def main():
             evaluate_dataset("scienceqa", test_dataset, model, processor, output_file)
         except Exception as e:
             print(f"Failed to evaluate ScienceQA: {e}")
+            import traceback
+            traceback.print_exc()
+
+
+    # 4. 评测 VSTAR-Bench
+    if args.dataset in ["vstar_bench"]:
+        try:
+            print("Loading VSTAR-Bench dataset...")
+            dataset = load_dataset("lmms-lab/vstar-bench")
+            if "test" in dataset:
+                test_dataset = dataset["test"]
+            else:
+                first_split = list(dataset.keys())[0]
+                test_dataset = dataset[first_split]
+                print(f"[Warning] 'test' split not found, fallback to split: {first_split}")
+            test_dataset = test_dataset.filter(lambda e: e["image"] is not None).map(process_func_vstar, with_indices=True)
+
+            output_file = os.path.join(args.output_dir, "vstar_bench_qwen2vl_ori_results.jsonl")
+            evaluate_dataset("vstar_bench", test_dataset, model, processor, output_file)
+        except Exception as e:
+            print(f"Failed to evaluate VSTAR-Bench: {e}")
             import traceback
             traceback.print_exc()
 

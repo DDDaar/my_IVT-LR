@@ -32,7 +32,7 @@ class IVTLR(nn.Module):
         image_token_id,
         visual_start_id,
         visual_end_id,
-        num_selected_patches: int = 128,
+        num_selected_patches: int = 8,
         model_path: str = None,  # [新增参数]
     ):
 
@@ -50,6 +50,9 @@ class IVTLR(nn.Module):
         # Trace is disabled by default to keep original behavior unchanged.
         self.enable_trace = False
         self.last_trace = []
+        # Optional per-layer raw-attention trace for visualization; disabled by default.
+        self.trace_save_raw_layer_scores = False
+        self.trace_layer_indices = None
         print(f'选择了{num_selected_patches}个 patch')
 
         # tested with GPT2 and Llama3
@@ -88,28 +91,28 @@ class IVTLR(nn.Module):
         ####################################################################
 
 #         ####################################################################
-#         #魔改2、3
-#         #1. 获取 num_heads
-#         # 大多数 HF 模型（Qwen2-VL, Chameleon, Llama）使用 .num_attention_heads
-#         # GPT-2 使用 .n_head
-#         if hasattr(self.base_causallm.config, "num_attention_heads"):
-#             num_heads = self.base_causallm.config.num_attention_heads
-#         elif hasattr(self.base_causallm.config, "n_head"):
-#             num_heads = self.base_causallm.config.n_head
-#         else:
-#             raise ValueError("Cannot find number of attention heads in model config")
+        # #魔改2、3
+        #1. 获取 num_heads
+        # 大多数 HF 模型（Qwen2-VL, Chameleon, Llama）使用 .num_attention_heads
+        # GPT-2 使用 .n_head
+        if hasattr(self.base_causallm.config, "num_attention_heads"):
+            num_heads = self.base_causallm.config.num_attention_heads
+        elif hasattr(self.base_causallm.config, "n_head"):
+            num_heads = self.base_causallm.config.n_head
+        else:
+            raise ValueError("Cannot find number of attention heads in model config")
 
 
-#         if hasattr(self.base_causallm.config, "hidden_size"):
-#             hidden_size = self.base_causallm.config.hidden_size
-#         elif hasattr(self.base_causallm.config, "n_embd"):
-#             hidden_size = self.base_causallm.config.n_embd
+        if hasattr(self.base_causallm.config, "hidden_size"):
+            hidden_size = self.base_causallm.config.hidden_size
+        elif hasattr(self.base_causallm.config, "n_embd"):
+            hidden_size = self.base_causallm.config.n_embd
             
         
-#         self.head_gate = nn.Sequential(
-#             nn.Linear(hidden_size, num_heads), # 输入 latent hidden state，输出每个 head 的权重
-#             nn.Softmax(dim=-1) # 保证权重和为 1
-#         )
+        self.head_gate = nn.Sequential(
+            nn.Linear(hidden_size, num_heads), # 输入 latent hidden state，输出每个 head 的权重
+            nn.Softmax(dim=-1) # 保证权重和为 1
+        )
 #         ####################################################################
 
     
@@ -344,54 +347,55 @@ class IVTLR(nn.Module):
 
 #######################################################################原始                
                 #   Top-K
-                avg_attn = torch.cat(attentions, dim=1).mean(dim=1)  # (B, seq_len) 将所有层的注意力矩阵在 heads（头）维度上拼接，(B, L * heads, seq_len, seq_len)---->(B, seq_len, seq_len)
-                current_seq_len = avg_attn.size(1) #seq长度
+               #  avg_attn = torch.cat(attentions, dim=1).mean(dim=1)  # (B, seq_len) 将所有层的注意力矩阵在 heads（头）维度上拼接，(B, L * heads, seq_len, seq_len)---->(B, seq_len, seq_len)
+               #  current_seq_len = avg_attn.size(1) #seq长度
 
-                select_image_embeds = []
+               #  select_image_embeds = []
 
-                for b in range(B):
-                    #最后一个位置的注意力图
-                    last_attn = avg_attn[b, end - 1]  # shape=(seq_len,)
-                    vs, ve = vs_pos_per_batch[b], ve_pos_per_batch[b]
-                    scores = last_attn.clone()
+               #  for b in range(B):
+               #      #最后一个位置的注意力图
+               #      last_attn = avg_attn[b, end - 1]  # shape=(seq_len,)
+               #      vs, ve = vs_pos_per_batch[b], ve_pos_per_batch[b]
+               #      scores = last_attn.clone()
                     
-                    allowed_positions = image_mask[b, :current_seq_len]  # shape=(S,)
-                    invalid = ~allowed_positions
-                    #将非图像位置的分数设为负无穷，确保不会被选中
-                    scores[invalid] = float("-inf")
+               #      allowed_positions = image_mask[b, :current_seq_len]  # shape=(S,)
+               #      invalid = ~allowed_positions
+               #      #将非图像位置的分数设为负无穷，确保不会被选中
+               #      scores[invalid] = float("-inf")
 
-                    rel_scores = scores[vs+1 : ve]  # (image_len,)
-                    #选择图像token中的topk个
-                    topk_rel = rel_scores.topk(self.num_selected_patches, sorted=False)[1]  # rel idx
-                    abs_idxs = (vs + 1) + topk_rel
-                    if self.enable_trace:
-                        topk_scores = rel_scores[topk_rel]
-                        grid_thw_b = None
-                        if image_grid_thw is not None:
-                            grid_row = image_grid_thw[b]
-                            if torch.is_tensor(grid_row):
-                                grid_thw_b = [int(x) for x in grid_row.detach().cpu().tolist()]
-                        self.last_trace.append(
-                            {
-                                "pass_idx": int(pass_idx),
-                                "batch_idx": int(b),
-                                "vs": int(vs),
-                                "ve": int(ve),
-                                "rel_len": int(rel_scores.numel()),
-                                "topk_rel": [int(x) for x in topk_rel.detach().cpu().tolist()],
-                                "topk_abs": [int(x) for x in abs_idxs.detach().cpu().tolist()],
-                                "topk_scores": [float(x) for x in topk_scores.detach().float().cpu().tolist()],
-                                "grid_thw": grid_thw_b,
-                            }
-                        )
-                    logging.debug(f"topk_rel: {topk_rel}")
-                    logging.debug(f"abs idx: {abs_idxs}")
-                    image_mask[b, abs_idxs] = False
+               #      rel_scores = scores[vs+1 : ve]  # (image_len,)
+               #      #选择图像token中的topk个
+               #      topk_rel = rel_scores.topk(self.num_selected_patches, sorted=False)[1]  # rel idx
+               #      abs_idxs = (vs + 1) + topk_rel
+               #      if self.enable_trace:
+               #          topk_scores = rel_scores[topk_rel]
+               #          grid_thw_b = None
+               #          if image_grid_thw is not None:
+               #              grid_row = image_grid_thw[b]
+               #              if torch.is_tensor(grid_row):
+               #                  grid_thw_b = [int(x) for x in grid_row.detach().cpu().tolist()]
+               #          self.last_trace.append(
+               #              {
+               #                  "pass_idx": int(pass_idx),
+               #                  "batch_idx": int(b),
+               #                  "vs": int(vs),
+               #                  "ve": int(ve),
+               #                  "rel_len": int(rel_scores.numel()),
+               #                  "topk_rel": [int(x) for x in topk_rel.detach().cpu().tolist()],
+               #                  "topk_abs": [int(x) for x in abs_idxs.detach().cpu().tolist()],
+               #                  "topk_scores": [float(x) for x in topk_scores.detach().float().cpu().tolist()],
+               #                  "rel_scores": [float(x) for x in rel_scores.detach().float().cpu().tolist()],
+               #                  "grid_thw": grid_thw_b,
+               #              }
+               #          )
+               #      logging.debug(f"topk_rel: {topk_rel}")
+               #      logging.debug(f"abs idx: {abs_idxs}")
+               #      image_mask[b, abs_idxs] = False
 
-                    #提取对应位置的embedding
-                    picked = inputs_embeds[b, abs_idxs, :]  # (K, D)
-                    select_image_embeds.append(picked)
-               #截止到'避免梯度传播'前面
+               #      #提取对应位置的embedding
+               #      picked = inputs_embeds[b, abs_idxs, :]  # (K, D)
+               #      select_image_embeds.append(picked)
+               # #截止到'避免梯度传播'前面
                     
 #######################################################################原始   
                 
@@ -455,69 +459,125 @@ class IVTLR(nn.Module):
 
 ################################################################################
 # # 使用hiddenstate->head提取各个head的权重进行加权求和，魔改2
-#                 # 在 forward 循环中修改 (约 175 行附近)
-#                 # hidden_states: (B, Seq_Len, Hidden_Size)
-#                 # 我们关注的是产生 Attention 的那个 Latent Token，即位置 end-1
-#                 current_latent_vector = hidden_states[:, end-1, :] # (B, Hidden_Size)
+                # 在 forward 循环中修改 (约 175 行附近)
+                # hidden_states: (B, Seq_Len, Hidden_Size)
+                # 我们关注的是产生 Attention 的那个 Latent Token，即位置 end-1
+                current_latent_vector = hidden_states[:, end-1, :] # (B, Hidden_Size)
                 
-#                 # 生成动态权重 (B, Num_Heads)
-#                 dynamic_head_weights = self.head_gate(current_latent_vector) 
-#                 dynamic_head_weights = dynamic_head_weights.unsqueeze(-1).unsqueeze(-1) # (B, Num_Heads, 1, 1)
+                # 生成动态权重 (B, Num_Heads)
+                dynamic_head_weights = self.head_gate(current_latent_vector) 
+                dynamic_head_weights = dynamic_head_weights.unsqueeze(-1).unsqueeze(-1) # (B, Num_Heads, 1, 1)
                 
-#                 # 开始融合
-#                 layer_fused_attns = []
-#                 for layer_attn in attentions:
-#                     # layer_attn: (B, Num_Heads, S, S)
-#                     # 我们只需要最后一行 (Latent Token 对其他 Token 的关注度)
-#                     # 注意：原始代码取了 avg_attn[b, end-1]，我们在融合前就可以切片以节省显存，或者在融合后切片
+                # 开始融合
+                layer_fused_attns = []
+                for layer_attn in attentions:
+                    # layer_attn: (B, Num_Heads, S, S)
+                    # 我们只需要最后一行 (Latent Token 对其他 Token 的关注度)
+                    # 注意：原始代码取了 avg_attn[b, end-1]，我们在融合前就可以切片以节省显存，或者在融合后切片
                     
-#                     # 加权求和: Sum(Attention * Weight)
-#                     # (B, Num_Heads, S, S) * (B, Num_Heads, 1, 1) -> Sum dim=1 -> (B, S, S)
-#                     weighted_attn = (layer_attn * dynamic_head_weights).sum(dim=1)
-#                     layer_fused_attns.append(weighted_attn)
+                    # 加权求和: Sum(Attention * Weight)
+                    # (B, Num_Heads, S, S) * (B, Num_Heads, 1, 1) -> Sum dim=1 -> (B, S, S)
+                    weighted_attn = (layer_attn * dynamic_head_weights).sum(dim=1)
+                    layer_fused_attns.append(weighted_attn)
                 
-#                 # 层间融合 (依然可以先用平均，或者参考方案二)
-#                 avg_attn = torch.stack(layer_fused_attns, dim=0).mean(dim=0)
-#                 current_seq_len = avg_attn.size(1)
+                # 层间融合 (依然可以先用平均，或者参考方案二)
+                avg_attn = torch.stack(layer_fused_attns, dim=0).mean(dim=0)
+                current_seq_len = avg_attn.size(1)
 
-#                 select_image_embeds = []
+                select_image_embeds = []
 
-#                 for b in range(B):
-#                     #最后一个位置的注意力图
-#                     last_attn = avg_attn[b, end - 1]  # shape=(seq_len,)
-#                     vs, ve = vs_pos_per_batch[b], ve_pos_per_batch[b]
-#                     scores = last_attn.clone()
+                for b in range(B):
+                    #最后一个位置的注意力图
+                    last_attn = avg_attn[b, end - 1]  # shape=(seq_len,)
+                    vs, ve = vs_pos_per_batch[b], ve_pos_per_batch[b]
+                    scores = last_attn.clone()
                     
-#                     allowed_positions = image_mask[b, :current_seq_len]  # shape=(S,)
-#                     invalid = ~allowed_positions
-#                     #将非图像位置的分数设为负无穷，确保不会被选中
-#                     scores[invalid] = float("-inf")
+                    allowed_positions = image_mask[b, :current_seq_len]  # shape=(S,)
+                    invalid = ~allowed_positions
+                    #将非图像位置的分数设为负无穷，确保不会被选中
+                    scores[invalid] = float("-inf")
 
-#                     rel_scores = scores[vs+1 : ve]  # (image_len,)
+                    rel_scores = scores[vs+1 : ve]  # (image_len,)
 
-#                     # 【核心修改点】同时保留 topk_scores，以此作为梯度的桥梁
-#                     topk_scores, topk_rel = rel_scores.topk(self.num_selected_patches, sorted=False) 
+                    # 【核心修改点】同时保留 topk_scores，以此作为梯度的桥梁
+                    topk_scores, topk_rel = rel_scores.topk(self.num_selected_patches, sorted=False) 
 
-#                     abs_idxs = (vs + 1) + topk_rel
-#                     logging.debug(f"topk_rel: {topk_rel}")
-#                     logging.debug(f"abs idx: {abs_idxs}")
-#                     image_mask[b, abs_idxs] = False
+                    abs_idxs = (vs + 1) + topk_rel
+                    logging.debug(f"topk_rel: {topk_rel}")
+                    logging.debug(f"abs idx: {abs_idxs}")
 
-#                     # #提取对应位置的embedding
-#                     # picked = inputs_embeds[b, abs_idxs, :]  # (K, D)
-#                     # select_image_embeds.append(picked)
+                    if self.enable_trace:
+                        grid_thw_b = None
+                        if image_grid_thw is not None:
+                            grid_row = image_grid_thw[b]
+                            if torch.is_tensor(grid_row):
+                                grid_thw_b = [int(x) for x in grid_row.detach().cpu().tolist()]
+                            else:
+                                grid_thw_b = [int(x) for x in grid_row]
+
+                        trace_payload = {
+                            "pass_idx": int(pass_idx),
+                            "batch_idx": int(b),
+                            "vs": int(vs),
+                            "ve": int(ve),
+                            "rel_len": int(rel_scores.numel()),
+                            "topk_rel": [int(x) for x in topk_rel.detach().cpu().tolist()],
+                            "topk_abs": [int(x) for x in abs_idxs.detach().cpu().tolist()],
+                            "topk_scores": [float(x) for x in topk_scores.detach().float().cpu().tolist()],
+                            "rel_scores": [float(x) for x in rel_scores.detach().float().cpu().tolist()],
+                            "grid_thw": grid_thw_b,
+                        }
+
+                        if self.trace_save_raw_layer_scores and self.trace_layer_indices:
+                            num_layers = len(attentions)
+                            normalized_layers = []
+                            seen = set()
+                            for raw_idx in self.trace_layer_indices:
+                                idx = int(raw_idx)
+                                if idx < 0:
+                                    idx = num_layers + idx
+                                if idx < 0 or idx >= num_layers:
+                                    continue
+                                if idx in seen:
+                                    continue
+                                seen.add(idx)
+                                normalized_layers.append(idx)
+
+                            raw_layer_rel_scores = []
+                            for layer_idx in normalized_layers:
+                                layer_attn = attentions[layer_idx]
+                                # Raw layer attention: head-mean of the latent query row before gate weighting.
+                                layer_last_attn = layer_attn[b, :, end - 1].mean(dim=0)
+                                layer_scores = layer_last_attn.clone()
+                                layer_scores[invalid] = float("-inf")
+                                layer_rel_scores = layer_scores[vs + 1 : ve]
+                                raw_layer_rel_scores.append(
+                                    [float(x) for x in layer_rel_scores.detach().float().cpu().tolist()]
+                                )
+
+                            if normalized_layers:
+                                trace_payload["raw_layer_indices"] = [int(x) for x in normalized_layers]
+                                trace_payload["raw_layer_rel_scores"] = raw_layer_rel_scores
+
+                        self.last_trace.append(trace_payload)
+
+                    image_mask[b, abs_idxs] = False
+
+                    # #提取对应位置的embedding
+                    # picked = inputs_embeds[b, abs_idxs, :]  # (K, D)
+                    # select_image_embeds.append(picked)
 
                     
-#                     # 6. 从原始 inputs_embeds 中提取对应的 patch 特征
-#                     picked_embeds = inputs_embeds[b, abs_idxs, :]  # (K, D)
-#                     # 7. 【使用直通估计器 (STE) 融合梯度】
-#                     # 正向传播：ste_weight 为 1.0，picked 特征值保持不变
-#                     # 反向传播：梯度将通过 topk_scores 流向 rel_scores -> last_attn -> head_gate
-#                     # 梯度会以 $1 \times \text{gradient}$ 的大小，完好无损地传递给 topk_scores，进而流向产生这个分数的 rel_scores 和 head_gate
-#                     ste_weight = (topk_scores - topk_scores.detach() + 1.0).unsqueeze(-1)
-#                     picked = picked_embeds * ste_weight
+                    # 6. 从原始 inputs_embeds 中提取对应的 patch 特征
+                    picked_embeds = inputs_embeds[b, abs_idxs, :]  # (K, D)
+                    # 7. 【使用直通估计器 (STE) 融合梯度】
+                    # 正向传播：ste_weight 为 1.0，picked 特征值保持不变
+                    # 反向传播：梯度将通过 topk_scores 流向 rel_scores -> last_attn -> head_gate
+                    # 梯度会以 $1 \times \text{gradient}$ 的大小，完好无损地传递给 topk_scores，进而流向产生这个分数的 rel_scores 和 head_gate
+                    ste_weight = (topk_scores - topk_scores.detach() + 1.0).unsqueeze(-1)
+                    picked = picked_embeds * ste_weight
                     
-#                     select_image_embeds.append(picked)
+                    select_image_embeds.append(picked)
                 
 # ################################################################################
                 

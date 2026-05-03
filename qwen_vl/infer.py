@@ -91,7 +91,7 @@ def load_inference_model(checkpoint_path, model_base_path, num_selected_patches=
     if any(k.startswith("module.") for k in state_dict.keys()):
         state_dict = {k.replace("module.", ""): v for k, v in state_dict.items()}
     
-    model.load_state_dict(state_dict, strict=False)
+    model.load_state_dict(state_dict, strict=True)
     # print(model) # 保持输出简洁，注释掉
     print("Successfully load model")
     
@@ -135,6 +135,71 @@ def extract_answer_scienceqa(text):
     logging.warning(f"No answer pattern found in text: {text[:200]}")
     return -1
 
+def normalize_vstar_label(label):
+    if isinstance(label, int):
+        if label < 0:
+            return ""
+        return chr(ord("A") + label)
+    if isinstance(label, str):
+        value = label.strip().upper()
+        if not value:
+            return ""
+        if len(value) == 1 and "A" <= value <= "Z":
+            return value
+        digit_match = re.search(r"\d+", value)
+        if digit_match:
+            idx = int(digit_match.group(0))
+            if idx >= 0:
+                return chr(ord("A") + idx)
+        letter_match = re.search(r"[A-Z]", value)
+        if letter_match:
+            return letter_match.group(0)
+    return ""
+
+def extract_option_set_from_text(text):
+    if not isinstance(text, str):
+        return None
+    patterns = [
+        r"^\s*\(?([A-Z])\)\s+",
+        r"^\s*([A-Z])[\.\:]\s+",
+        r"\n\s*\(?([A-Z])\)\s+",
+        r"\n\s*([A-Z])[\.\:]\s+",
+    ]
+    options = set()
+    for pattern in patterns:
+        for match in re.finditer(pattern, text, re.MULTILINE):
+            options.add(match.group(1).upper())
+    if options:
+        return options
+    return None
+
+def extract_answer_vstar(text, valid_options=None):
+    if not isinstance(text, str):
+        return ""
+    allowed = valid_options if valid_options else {chr(ord("A") + i) for i in range(10)}
+    allowed = set(x.upper() for x in allowed)
+
+    patterns = [
+        r"(?:final\s+answer|the\s+answer\s+is|answer)\s*[:：]?\s*\(?([A-Z])\)?",
+        r"(?:option|choice)\s*[:：]?\s*\(?([A-Z])\)?",
+    ]
+
+    matches = []
+    for pattern in patterns:
+        for m in re.finditer(pattern, text, re.IGNORECASE):
+            letter = m.group(1).upper()
+            if letter in allowed:
+                matches.append(letter)
+    if matches:
+        return matches[-1]
+
+    # Fallback: take the last standalone option letter from text.
+    fallback_tokens = re.findall(r"\b([A-Z])\b", text.upper())
+    for token in reversed(fallback_tokens):
+        if token in allowed:
+            return token
+    return ""
+
 def format_prompt_scienceqa(example):
     """
     适配 ScienceQA 的 Prompt 格式
@@ -164,6 +229,33 @@ def process_func_scienceqa(example, idx):
         "question_raw": prompt,
         "image_raw": image,
         "gt_answer": answer,
+    }
+
+def format_prompt_vstar_bench(example):
+    prompt = example.get("text", "")
+    if not isinstance(prompt, str):
+        prompt = str(prompt)
+    prompt = prompt.strip()
+    if not re.search(r"answer\s*[:：]?\s*$", prompt, re.IGNORECASE):
+        prompt = prompt + "\nAnswer:"
+
+    label = normalize_vstar_label(example.get("label", ""))
+    image = example.get("image", None)
+    category = example.get("category", "unknown")
+    question_id = example.get("question_id", "")
+    valid_options = extract_option_set_from_text(example.get("text", ""))
+    return prompt, label, image, category, question_id, valid_options
+
+def process_func_vstar_bench(example, idx):
+    prompt, answer, image, category, question_id, valid_options = format_prompt_vstar_bench(example)
+    return {
+        "idx": idx,
+        "question_raw": prompt,
+        "image_raw": image,
+        "gt_answer": answer,
+        "category": category,
+        "question_id": question_id if question_id != "" else idx,
+        "valid_options": sorted(list(valid_options)) if valid_options else None,
     }
 
 def evaluate_scienceqa(model, processor, image_h, image_w, output_path="output/qwen2vl_scienceqa.json"):
@@ -267,6 +359,130 @@ def evaluate_scienceqa(model, processor, image_h, image_w, output_path="output/q
     output_data = {
         "accuracy": final_acc,
         "avg_tokens": avg_tokens,
+        "results": results
+    }
+    with open(output_path, "w", encoding="utf-8") as f:
+        json.dump(output_data, f, ensure_ascii=False, indent=2)
+
+def evaluate_vstar_bench(model, processor, image_h, image_w, output_path="output/qwen2vl_vstar_bench.json"):
+    print("Loading VSTAR-Bench dataset...")
+    dataset = load_dataset("lmms-lab/vstar-bench")
+    if "test" in dataset:
+        val_dataset = dataset["test"]
+    else:
+        first_split = list(dataset.keys())[0]
+        val_dataset = dataset[first_split]
+        print(f"[Warning] 'test' split not found, fallback to split: {first_split}")
+
+    val_dataset = val_dataset.filter(lambda e: e["image"] is not None)
+    val_dataset = val_dataset.map(lambda example, idx: process_func_vstar_bench(example, idx), with_indices=True)
+
+    print(f"Starting VSTAR-Bench evaluation on {len(val_dataset)} samples...")
+
+    model.eval()
+    correct = 0
+    total = 0
+    results = {}
+    category_stats = {}
+    total_generated_tokens = 0
+    total_generate_time = 0.0
+
+    output_dir = os.path.dirname(output_path)
+    if output_dir:
+        os.makedirs(output_dir, exist_ok=True)
+
+    for ex in val_dataset:
+        input_text = ex["question_raw"]
+        messages = [{
+            "role": "user",
+            "content": [
+                {"type": "image", "image": ex["image_raw"], "resized_height": image_h, "resized_width": image_w},
+                {"type": "text", "text": input_text}
+            ]
+        }]
+
+        text = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+        text = text + "<|latent|>" + "<|latent|>" + "<|latent|>"
+
+        image_inputs, video_inputs = process_vision_info(messages)
+        inputs = processor(
+            text=[text],
+            images=image_inputs,
+            videos=video_inputs,
+            padding=True,
+            return_tensors="pt"
+        ).to(device)
+
+        prompt_length = inputs["input_ids"].shape[1]
+
+        generate_start_time = time.time()
+        with torch.no_grad():
+            outputs = model.generate(
+                input_ids=inputs["input_ids"],
+                attention_mask=inputs["attention_mask"],
+                pixel_values=inputs["pixel_values"],
+                image_grid_thw=inputs["image_grid_thw"],
+                max_new_tokens=512
+            )
+        generate_end_time = time.time()
+        sample_generate_time = generate_end_time - generate_start_time
+        total_generate_time += sample_generate_time
+
+        generated_tokens = outputs[0, prompt_length:]
+        new_generated_text = processor.decode(generated_tokens, skip_special_tokens=True)
+        num_generated_tokens = len(generated_tokens)
+        total_generated_tokens += num_generated_tokens
+
+        valid_options = set(ex["valid_options"]) if ex["valid_options"] else None
+        pred_answer = extract_answer_vstar(new_generated_text, valid_options=valid_options)
+        gt_answer = ex["gt_answer"]
+
+        is_correct = (pred_answer == gt_answer)
+        if is_correct:
+            correct += 1
+        total += 1
+
+        category = ex["category"] if ex["category"] is not None else "unknown"
+        if category not in category_stats:
+            category_stats[category] = {"correct": 0, "total": 0}
+        category_stats[category]["total"] += 1
+        if is_correct:
+            category_stats[category]["correct"] += 1
+
+        idx_str = str(ex["idx"])
+        results[idx_str] = {
+            "question_id": ex["question_id"],
+            "category": category,
+            "pred": pred_answer,
+            "gt": gt_answer,
+            "correct": is_correct,
+            "generated_text": new_generated_text
+        }
+
+        if total % 10 == 0:
+            print(f"Processed {total}, Current Accuracy: {correct/total:.2%}")
+            logging.info(f"[VSTAR-Bench] Processed {total}, Accuracy: {correct/total:.2%}")
+
+    final_acc = correct / total if total > 0 else 0
+    avg_tokens = total_generated_tokens / total if total > 0 else 0
+    avg_time = total_generate_time / total if total > 0 else 0
+
+    category_accuracy = {}
+    for category, stat in category_stats.items():
+        c_total = stat["total"]
+        c_correct = stat["correct"]
+        category_accuracy[category] = (c_correct / c_total) if c_total > 0 else 0.0
+
+    print(f"\n[Final VSTAR-Bench Results] Accuracy: {final_acc:.2%}, Avg Tokens: {avg_tokens:.1f}, Avg Time: {avg_time:.3f}s")
+    print("[Category Accuracy]")
+    for category in sorted(category_accuracy.keys()):
+        print(f"  - {category}: {category_accuracy[category]:.2%}")
+
+    output_data = {
+        "accuracy": final_acc,
+        "avg_tokens": avg_tokens,
+        "avg_time": avg_time,
+        "category_accuracy": category_accuracy,
         "results": results
     }
     with open(output_path, "w", encoding="utf-8") as f:
@@ -426,7 +642,7 @@ def evaluate_m3cot(model, processor, image_h, image_w, output_path="output/qwen2
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Inference for IVT-LR (Qwen2-VL)")
     parser.add_argument("--checkpoint", type=str, default='/home/ma-user/work/lbx/IVT-LR/qwen_vl/output/m3cot_qwen2vl_2B_IVTLR/epoch_16_full_model_fp32.pth', help="Path to the model checkpoint (pth file)")
-    parser.add_argument("--dataset", type=str, default="m3cot", choices=["m3cot", "scienceqa"], help="Dataset to evaluate (m3cot or scienceqa)")
+    parser.add_argument("--dataset", type=str, default="m3cot", choices=["m3cot", "scienceqa", "vstar_bench"], help="Dataset to evaluate (m3cot or scienceqa or vstar_bench)")
     parser.add_argument("--model_base_path", type=str, default="/home/ma-user/work/lbx/models/Qwen2-VL-2B-Instruct", help="Path to the base Qwen2-VL model (2B or 7B)")
     parser.add_argument("--output_path", type=str, default="output/qwen2-vl-2b-m3cot.jsonl", help="Path to the base Qwen2-VL model (2B or 7B)")
     
@@ -452,6 +668,8 @@ if __name__ == "__main__":
         evaluate_m3cot(model, processor, image_h, image_w, output_path)
     elif args.dataset == "scienceqa":
         evaluate_scienceqa(model, processor, image_h, image_w, output_path)
+    elif args.dataset == "vstar_bench":
+        evaluate_vstar_bench(model, processor, image_h, image_w, output_path)
     else:
         print("Invalid dataset selected.")
 

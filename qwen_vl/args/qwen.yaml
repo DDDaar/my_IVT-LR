@@ -9,7 +9,7 @@ model_type: "2B"  # 选项: "2B" 或 "7B"
 model_path_2b: "/home/ma-user/work/lbx/models/Qwen2-VL-2B-Instruct" # 请修改为实际2B模型路径
 model_path_7b: "/home/ma-user/work/lbx/models/Qwen2-VL-7B-Instruct" # 请修改为实际7B模型路径
 # suffix: '_modify_2plus_head_and_layer_gate'
-suffix: 'choose_128_topk_560'
+suffix: 'choose_8_topk_560_mogai2(hiddenstate_head_fusion)'
 
 # -----------------
 # 尝试一下纯cot
