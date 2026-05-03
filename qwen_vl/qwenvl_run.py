@@ -1090,7 +1090,7 @@ def main():
         #           # not configs.debug and 
             
         if (
-             (epoch + 1) % 4 == 0
+             (epoch + 1) % 4 == 0 or (epoch+1)==configs.num_epochs
         ):
             
             epoch_save_dir = os.path.join(save_dir, f"epoch_{epoch+1}_checkpoint")

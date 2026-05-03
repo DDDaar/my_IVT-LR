@@ -3,7 +3,7 @@
 # =========================
 
 run_name: "m3cot_qwen2vl_grpo"
-output_dir: "/home/ma-user/work/lbx/IVT-LR/qwen_vl/output_grpo/m3cot_qwen2vl_grpo"
+output_dir: "/home/ma-user/work/lbx/IVT-LR/qwen_vl/output_grpo/m3cot_qwen2vl_grpo_after_1epochsft—grpo5epoch"
 
 # Dataset: m3cot or scienceqa
 dataset_name: "m3cot"
@@ -14,7 +14,7 @@ seed: 42
 num_proc: 1
 
 # Keep latent placeholder style aligned with SFT final stage.
-max_latent_stage: 3
+max_latent_stage: 0
 pad_latent_to_max: true
 
 # Model selection
@@ -27,13 +27,15 @@ attn_implementation: "sdpa"
 # Must point to your previous SFT ckpt:
 # 1) adapter directory (contains adapter_config.json), or
 # 2) fp32 full state dict file, such as epoch_x_full_model_fp32.pth
-sft_ckpt_path: "/home/ma-user/work/lbx/IVT-LR/qwen_vl/output/m3cot_qwen2vl_2B_IVTLR/epoch_16_full_model_fp32.pth"
+sft_ckpt_path: "/home/ma-user/work/lbx/IVT-LR/qwen_vl/output/m3cot_qwen2vl_2B_IVTLRchoose_32_topk_purecot_1epoch/epoch_1_full_model_fp32.pth"
 
 # LoRA switch
 use_lora: true
 lora_r: 64
 lora_alpha: 16
 lora_dropout: 0.05
+
+
 lora_bias: "none"
 lora_target_modules:
   - "q_proj"
@@ -50,27 +52,31 @@ bf16: true
 gradient_checkpointing: true
 disable_gc_for_ddp: false
 # Keep aligned with SFT setting in checkpoint name: choose_8_topk
-num_selected_patches: 32
+num_selected_patches: 8
 ddp_find_unused_parameters: false
 ddp_broadcast_buffers: false
 min_ckpt_match_ratio: 0.30
-learning_rate: 1.0e-6
+learning_rate: 1.0e-5
 weight_decay: 0.0
 max_grad_norm: 1.0
 warmup_ratio: 0.03
 warmup_steps: 0
 lr_scheduler_type: "cosine"
 
-num_train_epochs: 1
-per_device_train_batch_size: 1
+# num_train_epochs: 1
+# per_device_train_batch_size: 1
+# num_generations: 8
+# gradient_accumulation_steps: 8
+num_train_epochs: 5
+per_device_train_batch_size: 2
 num_generations: 8
-gradient_accumulation_steps: 8
+gradient_accumulation_steps: 4
 
 dataloader_num_workers: 0
 
 # Rollout generation settings
 
-max_completion_length: 256
+max_completion_length: 512
 min_completion_length: 1
 max_prompt_length: null
 # Monkeypatch-based IVTLR sampling controls
@@ -94,6 +100,6 @@ verbose_rollout_rank0_only: true
 
 # Logging / checkpointing
 logging_steps: 1
-save_steps: 1000
+save_steps: 500
 save_total_limit: 3
 report_to: "wandb"  # "wandb" or "none"

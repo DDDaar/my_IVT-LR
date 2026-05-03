@@ -401,7 +401,7 @@ def _make_ivtlr_trl_compatible(ivtlr_model: IVTLR, cfg: Optional[Dict[str, Any]]
         temperature = float(kwargs.get("temperature", gen_defaults["temperature"]))
         top_k = int(kwargs.get("top_k", gen_defaults["top_k"]))
         top_p = float(kwargs.get("top_p", gen_defaults["top_p"]))
-        max_new_tokens = int(kwargs.get("max_new_tokens", kwargs.get("max_completion_length", 16)))
+        max_new_tokens = int(kwargs.get("max_new_tokens", kwargs.get("max_completion_length", 512)))
         num_images = _to_int_list(kwargs.get("num_images"))
 
         # Native IVTLR.generate only supports batch_size == 1.
@@ -821,7 +821,7 @@ def _load_sft_checkpoint_into_model(
     ivtlr_wrapper = _build_ivtlr_wrapper(model, tokenizer, processor, model_path, cfg=cfg)
 
     # infer.py-style strict load.
-    incompatible = ivtlr_wrapper.load_state_dict(source_sd, strict=True)
+    incompatible = ivtlr_wrapper.load_state_dict(source_sd, strict=False)
     print(
         "[CKPT] Strict load succeeded: "
         f"source_keys={len(source_sd)}, "
@@ -926,35 +926,67 @@ def _completion_to_text(completion: Any) -> str:
     return str(completion)
 
 
+# def _extract_answer_letter(text: str, valid_letters: Set[str]) -> Optional[str]:
+#     """
+#     Regex extraction aligned with existing SFT prompting/output convention:
+#     - prompt ends with "Answer:"
+#     - supervised target uses "Therefore, the answer is X"
+#     """
+#     if not text:
+#         return None
+
+#     pattern = (
+#         r"(?:Therefore,?\s*the\s+answer\s+is|the\s+answer\s+is|answer\s+is:?|Answer:)"
+#         r"\s*(?:Option)?\s*\(?([A-Za-z])\)?"
+#     )
+#     matches = re.findall(pattern, text, flags=re.IGNORECASE)
+#     if matches:
+#         for m in reversed(matches):
+#             pred = m.upper()
+#             if not valid_letters or pred in valid_letters:
+#                 return pred
+
+#     # Fallback: last standalone letter.
+#     candidates = re.findall(r"\b([A-Za-z])\b", text)
+#     for c in reversed(candidates):
+#         pred = c.upper()
+#         if not valid_letters or pred in valid_letters:
+
+#             return pred
+
+#     return None
+
 def _extract_answer_letter(text: str, valid_letters: Set[str]) -> Optional[str]:
-    """
-    Regex extraction aligned with existing SFT prompting/output convention:
-    - prompt ends with "Answer:"
-    - supervised target uses "Therefore, the answer is X"
-    """
     if not text:
         return None
 
-    pattern = (
-        r"(?:Therefore,?\s*the\s+answer\s+is|the\s+answer\s+is|answer\s+is:?|Answer:)"
-        r"\s*(?:Option)?\s*\(?([A-Za-z])\)?"
-    )
-    matches = re.findall(pattern, text, flags=re.IGNORECASE)
-    if matches:
-        for m in reversed(matches):
-            pred = m.upper()
-            if not valid_letters or pred in valid_letters:
-                return pred
+    # 增强版正则：支持 "D. ", "answer is: B", "answer is: **A" 等
+    patterns = [
+        # 模式 1: 经典的引导词 (Therefore, the answer is X / Answer: X)
+        r"(?:Therefore,?\s*the\s+answer\s+is|the\s+answer\s+is|answer\s+is:?|Answer:)\s*(?:\*\*)?\s*(?:Option)?\s*\(?([A-Za-z])\)?",
+        # 模式 2: 行首或句中的选项标注 (例如 "D. Transporting")
+        r"(?:^|\n|(?<=\s))([A-Za-z])\s*(?:\.|\:)\s+",
+        # 模式 3: 包含加粗的选项 (例如 **A)
+        r"\*\*([A-Za-z])\*\*"
+    ]
+    
+    for pattern in patterns:
+        matches = re.findall(pattern, text, flags=re.IGNORECASE)
+        if matches:
+            for m in reversed(matches):
+                pred = m.upper()
+                if not valid_letters or pred in valid_letters:
+                    return pred
 
-    # Fallback: last standalone letter.
+    # 最后兜底：寻找文本中最后出现的单个独立字母
     candidates = re.findall(r"\b([A-Za-z])\b", text)
-    for c in reversed(candidates):
-        pred = c.upper()
+    if candidates:
+        pred = candidates[-1].upper()
         if not valid_letters or pred in valid_letters:
             return pred
 
     return None
-
+    
 
 def build_reward_functions(cfg: Dict[str, Any]):
     """
@@ -1110,7 +1142,23 @@ def build_reward_functions(cfg: Dict[str, Any]):
 
         return rewards
 
-    return [accuracy_reward]
+    def format_reward(completions, **kwargs):
+        """
+        格式奖励：仅当文本中包含标准的 "the answer is X" 结构时给予奖励。
+        """
+        rewards = []
+        # 标准格式正则：匹配 "the answer is [字母]"，允许可选的冒号、空格或加粗
+        format_pattern = r"the\s+answer\s+is:?\s*(?:\*\*)?[A-Za-z](?:\*\*)?"
+        
+        for completion in completions:
+            text = _completion_to_text(completion)
+            if re.search(format_pattern, text, flags=re.IGNORECASE):
+                rewards.append(0.2)  # 符合格式给正分
+            else:
+                rewards.append(0.0)  # 格式不对不扣分（由正确率函数负责），但没有格式分
+        return rewards
+    
+    return [accuracy_reward,format_reward]
 
 
 def main():

@@ -1,6 +1,10 @@
+from transformers import AutoTokenizer, AutoProcessor
+from qwen_ivtlr import IVTLR  
+from transformers import Qwen2VLForConditionalGeneration
 import torch
 from torch_npu.contrib import transfer_to_npu
-from transformers import Qwen2VLForConditionalGeneration, AutoTokenizer, AutoProcessor
+import deepspeed
+from peft import LoraConfig, get_peft_model
 from qwen_vl_utils import process_vision_info
 from datasets import load_dataset
 import re
@@ -8,8 +12,8 @@ import logging
 import json
 import os
 import time
-import argparse
-
+import argparse  # [新增] 用于命令行参数解析
+from datetime import timedelta
 # python infer_qwen2vl_pure_cot_infer.py \
 #     --ckpt_path "/home/ma-user/work/lbx/IVT-LR/qwen_vl/output/scienceqa_qwen2vl_2B_IVTLRpure_cot/epoch_16_full_model_fp32.pth" \
 #     --dataset scienceqa \
@@ -58,124 +62,233 @@ device = "cuda" if torch.cuda.is_available() else "cpu"
 
 
 
-def load_inference_model(model_path, ckpt_path=None):
-    """
-    加载原版 Qwen2-VL 模型，并可选加载 .pth 权重
-    """
-    print(f"Loading original Qwen2-VL model from {model_path}...")
+# def load_inference_model(model_path, ckpt_path=None):
+#     """
+#     加载原版 Qwen2-VL 模型，并可选加载 .pth 权重
+#     """
+#     print(f"Loading original Qwen2-VL model from {model_path}...")
     
-    # 1. 加载 Processor 和 Tokenizer
-    processor = AutoProcessor.from_pretrained(model_path)
+#     # 1. 加载 Processor 和 Tokenizer
+#     processor = AutoProcessor.from_pretrained(model_path)
+#     tokenizer = AutoTokenizer.from_pretrained(
+#         model_path,
+#         use_fast=False,
+#         trust_remote_code=True,
+#         padding_side="right"
+#     )
+    
+#     # 2. 加载基础架构
+#     model = Qwen2VLForConditionalGeneration.from_pretrained(
+#         model_path,
+#         device_map="cuda",
+#         torch_dtype=torch.bfloat16,
+#         trust_remote_code=True,
+#         attn_implementation="eager"
+#     )
+    
+#     # 3. 加载 .pth 权重 (如果提供)
+#     if ckpt_path and os.path.exists(ckpt_path):
+#         print(f"Loading weights from checkpoint: {ckpt_path}...")
+#         # map_location='cpu' 可以避免 OOM，加载后再转移到 GPU
+#         state_dict = torch.load(ckpt_path, map_location='cpu')
+        
+#         # 自动处理某些框架保存时可能存在的 'model' 或 'state_dict' 嵌套
+#         if 'model' in state_dict:
+#             state_dict = state_dict['model']
+#         elif 'state_dict' in state_dict:
+#             state_dict = state_dict['state_dict']
+
+#         # 核心：处理 Key 的前缀问题
+#         # 很多训练脚本会给 key 加上 "model." 前缀，如果直接 load 会匹配失败
+#         new_state_dict = {}
+#         for k, v in state_dict.items():
+#             name = k.replace("module.", "") # 去掉 DistributedDataParallel 产生的 module.
+#             # 如果你的 ckpt 里的 key 带有 "model." 前缀，而加载的 model 结构没有，则需要去掉
+#             # name = name.replace("model.", "") 
+#             new_state_dict[name] = v
+
+#         # 加载权重
+#         # strict=False 允许加载部分权重（例如只加载 LoRA 权重或忽略某些不匹配的层）
+#         msg = model.load_state_dict(new_state_dict, strict=False)
+#         print(f"Checkpoint loaded status: {msg}")
+    
+#     processor.tokenizer = tokenizer
+#     model.eval()
+    
+#     print("Model loaded successfully.")
+#     return model, processor, tokenizer
+
+def load_inference_model(model_base_path,checkpoint_path):
+    processor = AutoProcessor.from_pretrained(model_base_path)
     tokenizer = AutoTokenizer.from_pretrained(
-        model_path,
+        model_base_path,
         use_fast=False,
         trust_remote_code=True,
         padding_side="right"
     )
     
-    # 2. 加载基础架构
-    model = Qwen2VLForConditionalGeneration.from_pretrained(
-        model_path,
+    tokenizer.add_special_tokens({
+        "additional_special_tokens": [
+            "<|start-latent|>",
+            "<|end-latent|>",
+            "<|latent|>"
+        ]
+    })
+    
+    base_model = Qwen2VLForConditionalGeneration.from_pretrained(
+        model_base_path,
         device_map="cuda",
         torch_dtype=torch.bfloat16,
         trust_remote_code=True,
         attn_implementation="eager"
     )
-    
-    # 3. 加载 .pth 权重 (如果提供)
-    if ckpt_path and os.path.exists(ckpt_path):
-        print(f"Loading weights from checkpoint: {ckpt_path}...")
-        # map_location='cpu' 可以避免 OOM，加载后再转移到 GPU
-        state_dict = torch.load(ckpt_path, map_location='cpu')
-        
-        # 自动处理某些框架保存时可能存在的 'model' 或 'state_dict' 嵌套
-        if 'model' in state_dict:
-            state_dict = state_dict['model']
-        elif 'state_dict' in state_dict:
-            state_dict = state_dict['state_dict']
-
-        # 核心：处理 Key 的前缀问题
-        # 很多训练脚本会给 key 加上 "model." 前缀，如果直接 load 会匹配失败
-        new_state_dict = {}
-        for k, v in state_dict.items():
-            name = k.replace("module.", "") # 去掉 DistributedDataParallel 产生的 module.
-            # 如果你的 ckpt 里的 key 带有 "model." 前缀，而加载的 model 结构没有，则需要去掉
-            # name = name.replace("model.", "") 
-            new_state_dict[name] = v
-
-        # 加载权重
-        # strict=False 允许加载部分权重（例如只加载 LoRA 权重或忽略某些不匹配的层）
-        msg = model.load_state_dict(new_state_dict, strict=False)
-        print(f"Checkpoint loaded status: {msg}")
-    
+    base_model.resize_token_embeddings(len(tokenizer))
     processor.tokenizer = tokenizer
-    model.eval()
+
+    lora_config = LoraConfig(
+        task_type="CAUSAL_LM",
+        target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
+        r=64,
+        lora_alpha=16,
+        lora_dropout=0.05,
+        bias="none",
+        inference_mode=False
+    )
+    base_model = get_peft_model(base_model, lora_config)
     
-    print("Model loaded successfully.")
+    latent_id = tokenizer.convert_tokens_to_ids("<|latent|>")
+    start_id = tokenizer.convert_tokens_to_ids("<|start-latent|>")
+    end_id = tokenizer.convert_tokens_to_ids("<|end-latent|>")
+    image_token_id = tokenizer.convert_tokens_to_ids(processor.image_token)
+    visual_start_id = tokenizer.convert_tokens_to_ids("<|vision_start|>")
+    visual_end_id = tokenizer.convert_tokens_to_ids("<|vision_end|>")
+    
+    model = IVTLR(
+        base_model,
+        latent_token_id=latent_id,
+        start_latent_id=start_id,
+        end_latent_id=end_id,
+        eos_token_id=tokenizer.eos_token_id,
+        image_token_id=image_token_id,
+        visual_start_id=visual_start_id, 
+        visual_end_id=visual_end_id,
+        model_path=model_base_path
+    )
+    
+    print(f"Loading checkpoint from {checkpoint_path}...")
+    state_dict = torch.load(checkpoint_path, map_location="cpu")
+    # 处理 module. 前缀
+    if any(k.startswith("module.") for k in state_dict.keys()):
+        state_dict = {k.replace("module.", ""): v for k, v in state_dict.items()}
+    
+    model.load_state_dict(state_dict, strict=False)
+    # print(model) # 保持输出简洁，注释掉
+    print("Successfully load model")
+    
+    model = model.to(device)
+    model.eval()
     return model, processor, tokenizer
 
-# ================= 答案提取逻辑 (统一使用新逻辑) =================
 
+# ================= 答案提取逻辑 (统一使用新逻辑) =================
 def extract_answer_universal(text):
     """
-    统一的答案提取函数。
-    策略：寻找文本中出现的 "Therefore, the answer is X", "answer is X", "Answer: X" 模式，并取最后一个。
+    增强版答案提取函数：
+    1. 搜索结论性前缀（如 Therefore, the answer is...）。
+    2. 支持 A-Z 字母提取。
+    3. 支持数字提取并按 0->A, 1->B 映射。
+    4. 策略：取文本中最后一个匹配项。
     """
-    # 扩展匹配前缀，使用 (?:...) 非捕获组包含各种可能的前缀
-    # re.IGNORECASE 忽略大小写
-    # pattern 解释:
-    #   (?:Therefore,?\s*the\s+answer\s+is|the\s+answer\s+is|answer\s+is:?|Answer:) 匹配这四种前缀之一
-    #   \s* 匹配0个或多个空格
-    #   (?:Option)?  非捕获组，可选匹配 "Option" 单词
-    #   \s* 匹配空格
-    #   \(?          可选匹配左括号
-    #   ([A-D])      捕获组：匹配单个大写字母 (A-D) -> 这是我们要的答案
-    #   \)?          可选匹配右括号
-    pattern = r'(?:Therefore,?\s*the\s+answer\s+is|the\s+answer\s+is|answer\s+is:?|Answer:)\s*(?:Option)?\s*\(?([A-D])\)?'
+    
+    def map_indicator_to_alpha(match_str):
+        # 如果匹配到的是数字串
+        if match_str.isdigit():
+            num = int(match_str)
+            # 0 对应 A (65), 所以是 65 + num
+            if 0 <= num <= 25:
+                return chr(65 + num)
+            else:
+                return "FAILED"  # 数字超出 A-Z 范围
+        # 如果匹配到的是字母，直接转大写
+        return match_str.upper()
+
+    # 正则表达式解释：
+    # 前缀：匹配常见的结论引导词
+    # 捕获组 ([A-Z]|\d+)：匹配单个字母 或 一个以上的数字
+    pattern = r'(?:Therefore,?\s*the\s+answer\s+is|the\s+answer\s+is|answer\s+is:?|Answer:)\s*(?:Option)?\s*\(?([A-Z]|\d+)\)?'
     
     matches = re.findall(pattern, text, re.IGNORECASE)
     
     if matches:
-        # 返回最后一个匹配到的答案，通常这是纯 CoT 推理结束后的最终结论
-        return matches[-1].upper()
+        # 取最后一个匹配到的结论
+        return map_indicator_to_alpha(matches[-1])
     
-    # 如果没找到标准格式，尝试回退逻辑：找最后出现的单独字母
-    # 这是一个兜底策略，匹配行首或行尾的单独字母
-    fallback_matches = re.findall(r'(?:^|\s)([A-Z])(?:\.|,|$)', text)
+    # 兜底策略：寻找最后出现的孤立字母或数字（例如行首或结尾的 "A." 或 " 0"）
+    fallback_matches = re.findall(r'(?:^|\s)([A-Z]|\d+)(?:\.|,|$)', text)
     if fallback_matches:
-        return fallback_matches[-1].upper()
+        return map_indicator_to_alpha(fallback_matches[-1])
 
     return "FAILED"
 # def extract_answer_universal(text):
 #     """
 #     统一的答案提取函数。
-#     策略：寻找文本中出现的 "Answer: X" 模式，并取最后一个。
+#     策略：寻找文本中出现的 "Therefore, the answer is X", "answer is X", "Answer: X" 模式，并取最后一个。
 #     """
-#     # 匹配 Answer: A 或 Answer: (A) 或 Answer: Option A
+#     # 扩展匹配前缀，使用 (?:...) 非捕获组包含各种可能的前缀
 #     # re.IGNORECASE 忽略大小写
 #     # pattern 解释:
-#     #   Answer:      匹配固定的前缀
+#     #   (?:Therefore,?\s*the\s+answer\s+is|the\s+answer\s+is|answer\s+is:?|Answer:) 匹配这四种前缀之一
 #     #   \s* 匹配0个或多个空格
 #     #   (?:Option)?  非捕获组，可选匹配 "Option" 单词
 #     #   \s* 匹配空格
 #     #   \(?          可选匹配左括号
 #     #   ([A-Z])      捕获组：匹配单个大写字母 (A-Z) -> 这是我们要的答案
 #     #   \)?          可选匹配右括号
-#     pattern = r'Answer:\s*(?:Option)?\s*\(?([A-D])\)?'
+#     pattern = r'(?:Therefore,?\s*the\s+answer\s+is|the\s+answer\s+is|answer\s+is:?|Answer:)\s*(?:Option)?\s*\(?([A-Z])\)?'
     
 #     matches = re.findall(pattern, text, re.IGNORECASE)
     
 #     if matches:
-#         # 返回最后一个匹配到的答案，通常这是模型总结的最终结论
+#         # 返回最后一个匹配到的答案，通常这是纯 CoT 推理结束后的最终结论
 #         return matches[-1].upper()
     
 #     # 如果没找到标准格式，尝试回退逻辑：找最后出现的单独字母
 #     # 这是一个兜底策略，匹配行首或行尾的单独字母
-#     fallback_matches = re.findall(r'(?:^|\s)([A-D])(?:\.|,|$)', text)
+#     fallback_matches = re.findall(r'(?:^|\s)([A-Z])(?:\.|,|$)', text)
 #     if fallback_matches:
 #         return fallback_matches[-1].upper()
 
 #     return "FAILED"
+# # def extract_answer_universal(text):
+# #     """
+# #     统一的答案提取函数。
+# #     策略：寻找文本中出现的 "Answer: X" 模式，并取最后一个。
+# #     """
+# #     # 匹配 Answer: A 或 Answer: (A) 或 Answer: Option A
+# #     # re.IGNORECASE 忽略大小写
+# #     # pattern 解释:
+# #     #   Answer:      匹配固定的前缀
+# #     #   \s* 匹配0个或多个空格
+# #     #   (?:Option)?  非捕获组，可选匹配 "Option" 单词
+# #     #   \s* 匹配空格
+# #     #   \(?          可选匹配左括号
+# #     #   ([A-Z])      捕获组：匹配单个大写字母 (A-Z) -> 这是我们要的答案
+# #     #   \)?          可选匹配右括号
+# #     pattern = r'Answer:\s*(?:Option)?\s*\(?([A-Z])\)?'
+    
+# #     matches = re.findall(pattern, text, re.IGNORECASE)
+    
+# #     if matches:
+# #         # 返回最后一个匹配到的答案，通常这是模型总结的最终结论
+# #         return matches[-1].upper()
+    
+# #     # 如果没找到标准格式，尝试回退逻辑：找最后出现的单独字母
+# #     # 这是一个兜底策略，匹配行首或行尾的单独字母
+# #     fallback_matches = re.findall(r'(?:^|\s)([A-Z])(?:\.|,|$)', text)
+# #     if fallback_matches:
+# #         return fallback_matches[-1].upper()
+
+# #     return "FAILED"
 
 # ================= M3CoT 数据处理 =================
 
@@ -305,7 +418,8 @@ def evaluate_dataset(dataset_name, eval_dataset, model, processor, output_file):
             generated_tokens = outputs[0, prompt_length:]
             output_full_text = processor.decode(outputs[0], skip_special_tokens=True)
             new_generated_text = processor.decode(generated_tokens, skip_special_tokens=True)
-            
+
+ 
             logging.debug(f"[{dataset_name} ID:{ex['id']}] Generated: {new_generated_text}")
             
             gt_answer = ex["gt_answer"]
@@ -372,7 +486,7 @@ def main():
     
     
     # 1. 加载模型
-    model, processor, tokenizer = load_inference_model(args.model_path)
+    model, processor, tokenizer = load_inference_model(args.model_path,args.ckpt_path)
     
     # 2. 评测 M3CoT
     if args.dataset in ["m3cot", "all"]:

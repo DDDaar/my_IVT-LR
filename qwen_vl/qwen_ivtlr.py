@@ -32,7 +32,7 @@ class IVTLR(nn.Module):
         image_token_id,
         visual_start_id,
         visual_end_id,
-        num_selected_patches: int = 8,
+        num_selected_patches: int = 32,
         model_path: str = None,  # [新增参数]
     ):
 
@@ -399,7 +399,7 @@ class IVTLR(nn.Module):
             image_mask_init = torch.zeros((B, S), dtype=torch.bool, device=input_ids.device)
         
         #将所有序列统一到最大长度，方便批处理
-        max_len = 2000
+        max_len = 3000
         # print(f'序列长s是{S}')
         image_mask = torch.zeros((B, max_len), dtype=torch.bool, device=input_ids.device)
         image_mask[:, :S] = image_mask_init
@@ -496,6 +496,7 @@ class IVTLR(nn.Module):
                     rel_allowed = image_mask[b, vs + 1 : ve]  # shape=(image_len,)
                     rel_scores = last_attn[vs + 1 : ve].masked_fill(~rel_allowed, float("-inf"))
                     #选择图像token中的topk个
+                    print(f'正在选择 topk 个{self.num_selected_patches}latent vision')
                     topk_rel = rel_scores.topk(self.num_selected_patches, sorted=False)[1]  # rel idx
                     abs_idxs = (vs + 1) + topk_rel
                     logging.debug(f"topk_rel: {topk_rel}")
