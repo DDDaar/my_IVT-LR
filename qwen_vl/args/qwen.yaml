@@ -32,6 +32,7 @@ num_epochs: 16
 lr: !!float "4e-5"
 
 # IVTLR top-k scoring (backward-compatible defaults)
+num_selected_patches: 32
 use_head_gate: false
 candidate_pool_ratio: 2.0
 candidate_pool_max: 128

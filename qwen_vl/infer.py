@@ -27,7 +27,14 @@ import pdb
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
 # [修改] 增加 checkpoint_path 参数，不再硬编码
-def load_inference_model(checkpoint_path, model_base_path, num_selected_patches=0):
+def load_inference_model(
+    checkpoint_path,
+    model_base_path,
+    num_selected_patches=0,
+    w_attn=1.0,
+    w_grad=0.0,
+    candidate_pool_ratio=1.0,
+):
     processor = AutoProcessor.from_pretrained(model_base_path)
     tokenizer = AutoTokenizer.from_pretrained(
         model_base_path,
@@ -82,6 +89,9 @@ def load_inference_model(checkpoint_path, model_base_path, num_selected_patches=
         visual_start_id=visual_start_id, 
         visual_end_id=visual_end_id,
         num_selected_patches=num_selected_patches,
+        w_attn=w_attn,
+        w_grad=w_grad,
+        candidate_pool_ratio=candidate_pool_ratio,
         model_path=model_base_path
     )
     
@@ -647,6 +657,9 @@ if __name__ == "__main__":
     parser.add_argument("--output_path", type=str, default="output/qwen2-vl-2b-m3cot.jsonl", help="Path to the base Qwen2-VL model (2B or 7B)")
     
     parser.add_argument("--num_selected_patches", type=int, default=0, help="Number of selected patches for IVTLR")
+    parser.add_argument("--w_attn", type=float, default=1.0, help="Attention score weight in IVTLR fusion")
+    parser.add_argument("--w_grad", type=float, default=0.0, help="Gradient score weight in IVTLR fusion")
+    parser.add_argument("--candidate_pool_ratio", type=float, default=1.0, help="Candidate pool size ratio relative to top-k")
     parser.add_argument("--HW", type=int, nargs=2, metavar=("H", "W"), default=[280, 280], help="Inference image resized height and width, e.g. --HW 280 280")
     args = parser.parse_args()
     output_path = args.output_path
@@ -654,12 +667,15 @@ if __name__ == "__main__":
     image_h, image_w = args.HW
     if image_h <= 0 or image_w <= 0:
         raise ValueError(f"--HW must be positive integers, got H={image_h}, W={image_w}")
-    print(f"[Config] num_selected_patches={args.num_selected_patches}, image_hw=({image_h}, {image_w})")
+    print(f"[Config] num_selected_patches={args.num_selected_patches}, w_attn={args.w_attn}, w_grad={args.w_grad}, candidate_pool_ratio={args.candidate_pool_ratio}, image_hw=({image_h}, {image_w})")
     # 1. 加载模型
     model, processor, tokenizer = load_inference_model(
         args.checkpoint,
         args.model_base_path,
-        args.num_selected_patches
+        args.num_selected_patches,
+        w_attn=args.w_attn,
+        w_grad=args.w_grad,
+        candidate_pool_ratio=args.candidate_pool_ratio
     )
 
     

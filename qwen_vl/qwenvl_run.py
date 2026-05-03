@@ -900,6 +900,7 @@ def main():
         visual_start_id,
         visual_end_id,
         model_path=model_path,
+        num_selected_patches=getattr(configs, "num_selected_patches", 32),
         use_head_gate=getattr(configs, "use_head_gate", False),
         candidate_pool_ratio=getattr(configs, "candidate_pool_ratio", 1.0),
         candidate_pool_max=getattr(configs, "candidate_pool_max", 64),
